@@ -1,0 +1,11 @@
+# Runs the same four checks as scripts/check.sh before every commit.
+# Install once with: uv run pre-commit install
+repos:
+  - repo: local
+    hooks:
+      - id: check
+        name: ruff format, ruff lint, mypy, pytest
+        entry: scripts/check.sh
+        language: system
+        pass_filenames: false
+        always_run: true

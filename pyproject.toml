@@ -1,0 +1,68 @@
+[project]
+name = "autoresearch"
+version = "0.2.0"
+description = "Autoresearch service for faster software: an agent harness for CPU bound performance work on Sail"
+readme = "README.md"
+authors = [
+    { name = "Daniel Fleming", email = "daniel11ftw@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "sail>=0.11.4",
+]
+
+[project.scripts]
+autoresearch = "autoresearch.cli:main"
+
+[dependency-groups]
+dev = [
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pytest>=8",
+    "pre-commit>=3.8",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+extend-exclude = ["phase1", "runs", "artifacts"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle and pyflakes
+    "I",             # import order
+    "B",             # bugbear
+    "UP",            # modern syntax
+    "N",             # naming
+    "SIM",           # simplifications
+    "RET",           # return consistency
+    "ARG",           # unused arguments
+    "PTH",           # pathlib over os.path
+    "RUF",           # ruff's own checks
+]
+ignore = [
+    "E501",          # line length is enforced by the formatter
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+exclude = ["phase1", "runs"]
+warn_unreachable = true
+# The Sail SDK ships type stubs for its Rust core but not for every wrapper.
+[[tool.mypy.overrides]]
+module = "sail.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q -p no:cacheprovider"
