@@ -15,7 +15,6 @@ an incumbent.
 | `configs/` | One TOML file per run. |
 | `phase1/` | The measurement scripts that produced `artifacts/`. Not part of the harness. |
 | `artifacts/` | `repo.md` and `measurements.md`, the Phase 1 record. |
-| `.claude/` | Plain English findings, style guide, box bookkeeping, timing estimates. |
 
 ## Develop
 
