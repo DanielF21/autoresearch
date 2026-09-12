@@ -1,9 +1,14 @@
 """The worker's tools: a schema the model sees and an executor that runs in its box.
 
+Four tools, deliberately. The agent gets a shell and a description of the
+filesystem, and reads, searches and edits with it however it likes. The other
+three exist because each one encodes something the agent would otherwise have to
+rebuild correctly on every attempt: which tests are the module's, how a fair
+back to back timing is ordered, and how an attempt ends.
+
 Every executor takes the same context and returns a ToolResult. ``ended`` is
-True only for ``submit``. Paths are relative to the repository root inside the
-box and may not escape it. The shell tool can do anything; the referee, not the
-tool set, is what keeps a patch honest.
+True only for ``submit``. The shell can do anything; the referee, not the tool
+set, is what keeps a patch honest.
 """
 
 from __future__ import annotations
@@ -14,14 +19,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from autoresearch.boxes.image import GUEST_DIR, REPO_DIR
-from autoresearch.boxes.protocol import Box, BoxError
+from autoresearch.boxes.image import BASE_DIR, GUEST_DIR, REPO_DIR
+from autoresearch.boxes.protocol import Box
 from autoresearch.config import TargetSpec
 
-HISTORY_DIR = "/workspace/history"
-BASE_DIR = "/workspace/base"
 MAX_OUTPUT = 12_000
-DEFAULT_READ_LINES = 300
 SHELL_TIMEOUT_MAX = 900
 
 
@@ -58,19 +60,6 @@ def _clip(text: str, limit: int = MAX_OUTPUT) -> str:
     )
 
 
-def _path(ctx: ToolContext, raw: Any, base: str | None = None) -> str:
-    if not isinstance(raw, str) or not raw:
-        raise ToolError("path must be a non empty string")
-    if raw.startswith("/"):
-        if raw.startswith((ctx.repo, HISTORY_DIR, ctx.base)):
-            return raw
-        raise ToolError(f"absolute paths must be under {ctx.repo} or {HISTORY_DIR}")
-    parts = [p for p in raw.split("/") if p not in ("", ".")]
-    if ".." in parts:
-        raise ToolError("path may not contain ..")
-    return f"{base or ctx.repo}/{'/'.join(parts)}"
-
-
 def _int(args: dict[str, Any], key: str, default: int | None) -> int | None:
     v = args.get(key, default)
     if v is None:
@@ -82,58 +71,6 @@ def _int(args: dict[str, Any], key: str, default: int | None) -> int | None:
 
 
 # ----- executors ---------------------------------------------------------------------
-
-
-def read_file(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
-    path = _path(ctx, args.get("path"))
-    start = _int(args, "start", 1) or 1
-    end = _int(args, "end", None)
-    if end is None:
-        end = start + DEFAULT_READ_LINES - 1
-    cmd = f"awk 'NR>={start} && NR<={end} {{printf \"%6d\\t%s\\n\", NR, $0}}' {shlex.quote(path)}"
-    r = ctx.box.run(cmd, timeout=60)
-    if not r.ok:
-        return ToolResult(f"error: {r.stderr.strip() or 'cannot read'} ({path})")
-    if not r.stdout:
-        return ToolResult(f"(no lines {start} to {end} in {path})")
-    return ToolResult(_clip(r.stdout))
-
-
-def search(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
-    pattern = args.get("pattern")
-    if not isinstance(pattern, str) or not pattern:
-        raise ToolError("pattern must be a non empty string")
-    where = _path(ctx, args.get("path") or ".")
-    cmd = f"grep -rn --include='*.py' --include='*.md' --include='*.json' --include='*.diff' -e {shlex.quote(pattern)} {shlex.quote(where)} | head -200"
-    r = ctx.box.run(cmd, timeout=60)
-    if r.exit_code not in (0, 1):
-        return ToolResult(f"error: {r.stderr.strip()}")
-    return ToolResult(_clip(r.stdout) if r.stdout else "(no matches)")
-
-
-def edit_file(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
-    path = _path(ctx, args.get("path"))
-    old, new = args.get("old"), args.get("new")
-    if not isinstance(old, str) or not old or not isinstance(new, str):
-        raise ToolError("old must be a non empty string and new must be a string")
-    try:
-        text = ctx.box.read(path).decode()
-    except BoxError as e:
-        return ToolResult(f"error: cannot read {path}: {e}")
-    n = text.count(old)
-    if n != 1:
-        return ToolResult(f"error: old occurs {n} times in {path}; it must occur exactly once")
-    ctx.box.write(path, text.replace(old, new, 1).encode())
-    return ToolResult(f"edited {path}")
-
-
-def write_file(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
-    path = _path(ctx, args.get("path"))
-    content = args.get("content")
-    if not isinstance(content, str):
-        raise ToolError("content must be a string")
-    ctx.box.write(path, content.encode())
-    return ToolResult(f"wrote {len(content)} characters to {path}")
 
 
 def _guest(ctx: ToolContext, script: str, *args: str, timeout: int) -> dict[str, Any]:
@@ -268,43 +205,6 @@ def _params(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
 
 TOOLS: tuple[Tool, ...] = (
     Tool(
-        "read_file",
-        "Read a file from the repository with line numbers. Defaults to the first 300 lines; "
-        "pass start and end for a range. Also reads files under /workspace/history.",
-        _params(
-            {
-                "path": {"type": "string", "description": "path relative to the repo root"},
-                "start": {"type": "integer"},
-                "end": {"type": "integer"},
-            },
-            ["path"],
-        ),
-        read_file,
-    ),
-    Tool(
-        "search",
-        "Search files with grep. Searches the repository by default; pass path=/workspace/history "
-        "to search earlier attempts. Returns up to 200 matching lines.",
-        _params({"pattern": {"type": "string"}, "path": {"type": "string"}}, ["pattern"]),
-        search,
-    ),
-    Tool(
-        "edit_file",
-        "Replace one exact occurrence of old with new in a file. Fails if old is not found "
-        "exactly once, so include enough surrounding lines to be unique.",
-        _params(
-            {"path": {"type": "string"}, "old": {"type": "string"}, "new": {"type": "string"}},
-            ["path", "old", "new"],
-        ),
-        edit_file,
-    ),
-    Tool(
-        "write_file",
-        "Create or overwrite a file with the given content.",
-        _params({"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
-        write_file,
-    ),
-    Tool(
         "run_tests",
         "Run the test suite on your working tree. scope='module' runs the hot module's own "
         "tests in seconds; scope='full' runs everything in one to two minutes. The referee "
@@ -321,8 +221,10 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         "shell",
-        "Run a shell command in the repository root. Output is truncated. Use for anything the "
-        "other tools do not cover, such as git diff or a quick Python check.",
+        "Run a shell command. This is how you read, search and edit. Commands run in "
+        f"{REPO_DIR} unless you cd elsewhere. Output is truncated in the middle past "
+        f"{MAX_OUTPUT} characters, so page through large files rather than printing them "
+        f"whole. Default timeout 120 seconds, maximum {SHELL_TIMEOUT_MAX}.",
         _params({"cmd": {"type": "string"}, "timeout": {"type": "integer"}}, ["cmd"]),
         shell,
     ),

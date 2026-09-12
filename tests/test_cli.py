@@ -39,7 +39,7 @@ def test_status_on_a_run_directory(tmp_path: Path, capsys: pytest.CaptureFixture
             tests=(SuiteResult("module", 1, 0, 0, 1, True), SuiteResult("full", 1, 0, 0, 1, True)),
             base_fp="a",
             patched_fp="a",
-            median_ratio=1.03,
+            speedup=1.03,
         ),
     )
     assert main(["status", str(run_dir)]) == 0

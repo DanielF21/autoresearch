@@ -50,7 +50,7 @@ def test_real_speedup_is_measured_in_full(config: RunConfig) -> None:
     assert len(m.pairs) == 6
     assert [p.order for p in m.pairs] == ["base_first", "patched_first"] * 3
     assert [p.hash_seed for p in m.pairs] == [0, 1, 2, 3, 4, 0]
-    assert m.median_ratio == pytest.approx(1.05)
+    assert m.speedup == pytest.approx(1.05)
     assert m.noise_floor == 1.0106
     assert m.clears_noise
     assert m.ir is not None and m.ir.base == 1000 and m.ir.patched == 800
@@ -61,14 +61,14 @@ def test_real_speedup_is_measured_in_full(config: RunConfig) -> None:
 
 def test_within_noise_is_recorded_and_not_a_real_speedup(config: RunConfig) -> None:
     m = _referee(make_box(speedup=1.005), config).measure((PATCHES / "whitespace.diff").read_text())
-    assert m.tests_pass and m.median_ratio == pytest.approx(1.005)
+    assert m.tests_pass and m.speedup == pytest.approx(1.005)
     assert not m.clears_noise
     assert m.ir is not None
 
 
 def test_slowdown_is_measured_with_ratio_below_one(config: RunConfig) -> None:
     m = _referee(make_box(speedup=0.7), config).measure((PATCHES / "slowdown.diff").read_text())
-    assert m.median_ratio == pytest.approx(0.7) and not m.clears_noise
+    assert m.speedup == pytest.approx(0.7) and not m.clears_noise
 
 
 def test_out_of_scope_is_recorded_and_still_measured(config: RunConfig) -> None:
@@ -79,7 +79,7 @@ def test_out_of_scope_is_recorded_and_still_measured(config: RunConfig) -> None:
     )
     m = _referee(box, config).measure(diff)
     assert m.scope_violations and "denied" in m.scope_violations[0]
-    assert m.tests_pass and m.median_ratio == pytest.approx(1.5)
+    assert m.tests_pass and m.speedup == pytest.approx(1.5)
     assert not m.clears_noise  # out of scope can never count as a speedup
 
 
@@ -100,7 +100,7 @@ def test_test_failures_are_recorded_and_timing_still_runs(config: RunConfig) -> 
     box = make_box(module_ok=False, full_ok=False, speedup=1.2)
     m = _referee(box, config).measure(PRECOMPUTE)
     assert [t.ok for t in m.tests] == [False, False] and not m.tests_pass
-    assert m.median_ratio == pytest.approx(1.2)
+    assert m.speedup == pytest.approx(1.2)
     assert m.ir is not None
     assert not m.clears_noise
     assert any("--scope full" in c for c in box.commands)
@@ -109,7 +109,7 @@ def test_test_failures_are_recorded_and_timing_still_runs(config: RunConfig) -> 
 def test_different_result_is_recorded_and_timing_still_runs(config: RunConfig) -> None:
     m = _referee(make_box(speedup=2.0, fp_match=False), config).measure(PRECOMPUTE)
     assert m.result_matches is False
-    assert m.median_ratio == pytest.approx(2.0)
+    assert m.speedup == pytest.approx(2.0)
     assert not m.clears_noise
 
 
@@ -118,7 +118,7 @@ def test_patched_tree_that_cannot_run_skips_timing_and_counts(config: RunConfig)
     m = _referee(box, config).measure(PRECOMPUTE)
     assert m.tests_pass  # the tests ran before the verify step
     assert m.base_fp == "fp_same" and m.patched_fp == ""
-    assert m.pairs == () and m.median_ratio is None and m.ir is None
+    assert m.pairs == () and m.speedup is None and m.ir is None
     assert any("verify patched" in e for e in m.errors)
     assert any("skipped" in e for e in m.errors)
     assert not any("--repeats" in c for c in box.commands)
@@ -127,7 +127,7 @@ def test_patched_tree_that_cannot_run_skips_timing_and_counts(config: RunConfig)
 def test_contaminated_pairs_retry_once_then_record_an_error(config: RunConfig) -> None:
     box = make_box(contaminate_pairs=True)
     m = _referee(box, config).measure(PRECOMPUTE)
-    assert m.median_ratio is None
+    assert m.speedup is None
     assert any("clean pairs" in e for e in m.errors)
     launches = [c for c in box.commands if "time_target.py" in c and "--repeats" in c]
     assert len(launches) == 2 * 6 * 2  # two passes of six pairs, two launches each

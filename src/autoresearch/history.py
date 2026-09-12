@@ -194,7 +194,7 @@ def best_ratio(history: tuple[Attempt, ...]) -> tuple[float | None, int | None]:
     for a in history:
         if a.measurement is None or not a.measurement.clears_noise:
             continue
-        ratio = a.measurement.median_ratio
+        ratio = a.measurement.speedup
         if ratio is not None and (best is None or ratio > best):
             best, which = ratio, a.ref.number
     return best, which

@@ -102,7 +102,7 @@ class _Facts:
             patched_fp=self.patched_fp,
             canary_s=self.canary,
             pairs=self.pairs,
-            median_ratio=self.median,
+            speedup=self.median,
             ir=self.ir,
             errors=tuple(self.errors),
             provenance=Provenance(box_id=self.box_id),

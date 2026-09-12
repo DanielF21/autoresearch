@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from autoresearch.boxes.fake_box import FakeBox, FakeBoxFactory, fail, ok
-from autoresearch.boxes.image import REPO_DIR
+from autoresearch.boxes.image import BASE_DIR, HISTORY_DIR, REPO_DIR
 from autoresearch.config import RunConfig, load_config
 from autoresearch.model.fake_model import FakeChatModel, Scripted, text, tool_call
 from autoresearch.model.protocol import ModelError
@@ -21,7 +21,6 @@ from autoresearch.types import (
 )
 from autoresearch.worker.agent_loop import AgentLoopWorker
 from autoresearch.worker.protocol import WorkerInput
-from autoresearch.worker.tools import BASE_DIR, HISTORY_DIR
 from tests.helpers import BASE_SHA
 
 ROOT = Path(__file__).parent.parent
@@ -38,7 +37,7 @@ def prepare(box: FakeBox, role: str) -> None:
     assert role == "worker"
     box.on("git checkout -q --detach", ok(f"{BASE_SHA}\n"))
     box.on("git add -N", ok(DIFF))
-    box.on("awk", ok("     1\tdef f(): pass\n"))
+    box.on("cat -n", ok("     1\tdef f(): pass\n"))
     box.on(
         "run_tests.py",
         ok(json.dumps({"ok": True, "passed": 3, "failed": 0, "errors": 0, "duration_s": 1})),
@@ -58,8 +57,8 @@ def make_input(config: RunConfig, history: tuple[HistoryAttempt, ...] = ()) -> W
 
 def submit_script() -> list[Scripted]:
     return [
-        tool_call("read_file", {"path": "networkx/algorithms/cluster.py"}),
-        tool_call("edit_file", {"path": "networkx/algorithms/cluster.py", "old": "a", "new": "b"}),
+        tool_call("shell", {"cmd": "cat -n networkx/algorithms/cluster.py"}),
+        tool_call("shell", {"cmd": "sed -i s/a/b/ networkx/algorithms/cluster.py"}),
         tool_call("run_tests", {"scope": "module"}),
         tool_call("submit", {"predicted_speedup": 1.3, "rationale": "precompute neighbour sets"}),
     ]
@@ -71,12 +70,11 @@ def test_happy_path_submits_a_diff(config: RunConfig) -> None:
     worker = AgentLoopWorker(model, factory, config)
     box_holder: list[FakeBox] = []
 
-    def prep_and_edit(box: FakeBox, role: str) -> None:
+    def prep_and_watch(box: FakeBox, role: str) -> None:
         prepare(box, role)
-        box.write(f"{REPO_DIR}/networkx/algorithms/cluster.py", b"a\n")
         box_holder.append(box)
 
-    factory.prepare = prep_and_edit
+    factory.prepare = prep_and_watch
     out = worker.attempt(make_input(config))
 
     assert out.stop_reason == StopReason.SUBMITTED
@@ -88,13 +86,21 @@ def test_happy_path_submits_a_diff(config: RunConfig) -> None:
     assert out.box_id == "sb_fake_1"
     box = box_holder[0]
     assert box.terminated
-    assert box.read(f"{REPO_DIR}/networkx/algorithms/cluster.py") == b"b\n"
+    # The agent edits through the shell, so the harness never touches the tree.
+    # What it must do is put the agent's command into the box unchanged.
+    assert "sed -i s/a/b/ networkx/algorithms/cluster.py" in box.commands
     assert "/workspace/incumbent.diff" not in box.files
     setup_cmd = next(c for c in box.commands if "git checkout -q --detach" in c)
     assert f"--detach {BASE_SHA} " in setup_cmd
     assert "git apply" not in setup_cmd
-    assert any(BASE_DIR in c for c in box.commands)
     assert ("/workspace/guest/provenance.py") in box.files
+
+    # The base worktree is compiled before it is made read only. A read only
+    # tree cannot write __pycache__, so a cold one would recompile on every
+    # launch and make the base look slower than the working tree.
+    assert f"compileall -q {REPO_DIR} {BASE_DIR}" in setup_cmd
+    assert setup_cmd.index("compileall") < setup_cmd.index("chmod -R a-w")
+    assert f"chmod -R a-w {BASE_DIR}" in setup_cmd
 
     # A git pathspec is repository relative. Naming the sibling baseline
     # worktree by absolute path made git refuse the diff and lost a whole
@@ -133,7 +139,7 @@ def test_history_is_rendered_and_uploaded(config: RunConfig) -> None:
             ),
             base_fp="a",
             patched_fp="a",
-            median_ratio=1.002,
+            speedup=1.002,
         ),
     )
     boxes: list[FakeBox] = []
@@ -148,12 +154,25 @@ def test_history_is_rendered_and_uploaded(config: RunConfig) -> None:
     )
     AgentLoopWorker(model, factory, config).attempt(make_input(config, (earlier,)))
     content = model.requests[0][1]["content"]
-    assert "1 earlier attempts, 0 real speedups" in content
-    assert "tried caching" in content and "full FAIL" in content and "+b" in content
-    assert "median ratio vs original: 1.0020" in content and "real speedup" in content
+
+    # The prompt carries an index: what was tried, what it scored, what happened.
+    assert "1 earlier attempt, 0 real speedups" in content
+    assert "0001     1.00x" in content and "tests failed" in content
     assert "attempt 0002" in content
-    assert boxes[0].files[f"{HISTORY_DIR}/0001/patch.diff"] == DIFF.encode()
-    assert f"{HISTORY_DIR}/0001/measurement.json" in boxes[0].files
+
+    # It does not carry the attempts themselves. Rendering every diff into every
+    # turn is what the filesystem exists to avoid.
+    assert "+b" not in content
+    assert "tried caching" not in content
+
+    # The raw artifacts are on disk instead: the diff, the measurement, and the
+    # earlier worker's own words. No harness written summary.
+    files = boxes[0].files
+    assert files[f"{HISTORY_DIR}/0001/patch.diff"] == DIFF.encode()
+    assert f"{HISTORY_DIR}/0001/measurement.json" in files
+    assert b"tried caching" in files[f"{HISTORY_DIR}/0001/rationale.md"]
+    assert b"1.50x" in files[f"{HISTORY_DIR}/0001/rationale.md"]
+    assert not any(p.endswith("summary.md") for p in files)
 
 
 def test_max_turns_cap_collects_the_diff_so_far(config: RunConfig) -> None:
@@ -162,7 +181,7 @@ def test_max_turns_cap_collects_the_diff_so_far(config: RunConfig) -> None:
 
     cfg = replace(cfg, worker=replace(cfg.worker, max_turns=2))
     factory = FakeBoxFactory(prepare=prepare)
-    model = FakeChatModel(script=[tool_call("read_file", {"path": "x"}) for _ in range(5)])
+    model = FakeChatModel(script=[tool_call("shell", {"cmd": "cat -n x"}) for _ in range(5)])
     out = AgentLoopWorker(model, factory, cfg).attempt(make_input(cfg))
     assert out.stop_reason == StopReason.MAX_TURNS
     assert out.turns == 2
@@ -175,7 +194,7 @@ def test_max_input_tokens_cap(config: RunConfig) -> None:
 
     cfg = replace(config, worker=replace(config.worker, max_input_tokens=150))
     factory = FakeBoxFactory(prepare=prepare)
-    model = FakeChatModel(script=[tool_call("read_file", {"path": f"x{i}"}) for i in range(5)])
+    model = FakeChatModel(script=[tool_call("shell", {"cmd": f"cat -n x{i}"}) for i in range(5)])
     out = AgentLoopWorker(model, factory, cfg).attempt(make_input(cfg))
     assert out.stop_reason == StopReason.MAX_INPUT_TOKENS
     assert out.turns == 2  # 100 tokens after turn 1, 200 after turn 2, then the cap trips
@@ -183,7 +202,7 @@ def test_max_input_tokens_cap(config: RunConfig) -> None:
 
 def test_repeated_identical_tool_call_ends_the_attempt(config: RunConfig) -> None:
     factory = FakeBoxFactory(prepare=prepare)
-    model = FakeChatModel(script=[tool_call("read_file", {"path": "same"}) for _ in range(5)])
+    model = FakeChatModel(script=[tool_call("shell", {"cmd": "cat -n same"}) for _ in range(5)])
     out = AgentLoopWorker(model, factory, config).attempt(make_input(config))
     assert out.stop_reason == StopReason.REPEATED_TOOL_CALL
     assert out.turns == 3

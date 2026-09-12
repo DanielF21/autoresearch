@@ -96,9 +96,7 @@ def compute_status(
     attempts = history.load_history(paths)
     rounds = history.read_rounds(paths)
     measured = [a for a in attempts if a.measurement is not None]
-    timed = [
-        a.measurement.median_ratio for a in measured if a.measurement and a.measurement.median_ratio
-    ]
+    timed = [a.measurement.speedup for a in measured if a.measurement and a.measurement.speedup]
     best, which = history.best_ratio(attempts)
     usage = Usage()
     for a in attempts:

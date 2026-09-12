@@ -98,7 +98,7 @@ def cmd_measure(args: argparse.Namespace) -> int:
             )
             print(
                 f"  applied {m.applied}; tests {tests}; result matches {m.result_matches}; "
-                f"median {m.median_ratio}; clears noise {m.clears_noise}; ir {ir}; "
+                f"median {m.speedup}; clears noise {m.clears_noise}; ir {ir}; "
                 f"errors {list(m.errors)}; {m.wall_s:.0f}s",
                 flush=True,
             )

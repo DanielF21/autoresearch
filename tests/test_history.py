@@ -64,7 +64,7 @@ def test_measurement_is_added_once_and_appears_in_history(tmp_path: Path) -> Non
     paths = RunPaths(tmp_path)
     ref = AttemptRef(1, 1, 0)
     write_attempt(paths, ref, "abc", {}, _output(), "", duplicate_of="0000")
-    m = Measurement(noise_floor=1.0106, applied=True, median_ratio=1.002)
+    m = Measurement(noise_floor=1.0106, applied=True, speedup=1.002)
     write_measurement(paths, ref, m)
     h = load_history(paths)[0]
     assert h.measurement == m and h.duplicate_of == "0000"
@@ -80,7 +80,7 @@ def test_best_ratio_counts_only_real_speedups() -> None:
             tests=(SuiteResult("module", 1, 0, 0, 1, ok), SuiteResult("full", 1, 0, 0, 1, ok)),
             base_fp="a",
             patched_fp="a",
-            median_ratio=ratio,
+            speedup=ratio,
         )
         return _attempt(n, m)
 

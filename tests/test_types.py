@@ -56,7 +56,7 @@ def test_measurement_round_trip() -> None:
         patched_fp="a",
         canary_s=0.51,
         pairs=(_pair(0, 1.0, 0.95), _pair(1, 1.0, 0.96, contaminated=True)),
-        median_ratio=1.0526,
+        speedup=1.0526,
         ir=IrCounts(100, 90),
         errors=("instruction counts: valgrind missing",),
         provenance=Provenance(box_id="sb_x", cpu_flag_hash="abc"),
@@ -79,13 +79,13 @@ def test_clears_noise_requires_every_condition() -> None:
         tests=(_suite("module"), _suite("full")),
         base_fp="a",
         patched_fp="a",
-        median_ratio=1.02,
+        speedup=1.02,
     )
     assert good.clears_noise
     from dataclasses import replace
 
-    assert not replace(good, median_ratio=1.01).clears_noise
-    assert not replace(good, median_ratio=None).clears_noise
+    assert not replace(good, speedup=1.01).clears_noise
+    assert not replace(good, speedup=None).clears_noise
     assert not replace(good, tests=(_suite("module"), _suite("full", ok=False))).clears_noise
     assert not replace(good, tests=(_suite("module"),)).clears_noise  # full suite never ran
     assert not replace(good, patched_fp="b").clears_noise

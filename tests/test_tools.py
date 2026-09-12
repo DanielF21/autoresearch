@@ -1,12 +1,10 @@
 import json
 from pathlib import Path
 
-from autoresearch.boxes.fake_box import FakeBox, fail, ok
-from autoresearch.boxes.image import REPO_DIR
+from autoresearch.boxes.fake_box import FakeBox, ok
+from autoresearch.boxes.image import BASE_DIR, REPO_DIR
 from autoresearch.config import load_config
 from autoresearch.worker.tools import (
-    BASE_DIR,
-    HISTORY_DIR,
     TOOL_BY_NAME,
     TOOL_SPECS,
     ToolContext,
@@ -20,73 +18,23 @@ def ctx(box: FakeBox) -> ToolContext:
     return ToolContext(box=box, target=TARGET)
 
 
-def test_specs_are_openai_function_tools() -> None:
+def test_the_tool_set_is_four_tools() -> None:
+    """Reading, searching and editing are the shell's job, not a tool's.
+
+    The three that remain each encode something the agent would otherwise have
+    to rebuild correctly every attempt, and submit is how an attempt ends.
+    """
     names = {s["function"]["name"] for s in TOOL_SPECS}
-    assert (
-        names
-        == set(TOOL_BY_NAME)
-        == {
-            "read_file",
-            "search",
-            "edit_file",
-            "write_file",
-            "run_tests",
-            "run_benchmark",
-            "shell",
-            "submit",
-        }
-    )
+    assert names == set(TOOL_BY_NAME) == {"run_tests", "run_benchmark", "shell", "submit"}
     assert all(s["type"] == "function" and "parameters" in s["function"] for s in TOOL_SPECS)
 
 
-def test_read_file_numbers_lines_and_resolves_relative_paths() -> None:
-    box = FakeBox().on(
-        "awk", lambda cmd: ok("     1\tx = 1\n") if f"{REPO_DIR}/a/b.py" in cmd else fail()
-    )
-    r = execute(ctx(box), "read_file", {"path": "a/b.py"})
-    assert r.text == "     1\tx = 1\n"
-    assert "NR>=1 && NR<=300" in box.commands[-1]
-    r = execute(ctx(box), "read_file", {"path": "a/b.py", "start": 10, "end": 20})
-    assert "NR>=10 && NR<=20" in box.commands[-1]
-
-
-def test_paths_may_not_escape_the_repo() -> None:
-    box = FakeBox()
-    assert "error" in execute(ctx(box), "read_file", {"path": "../etc/passwd"}).text
-    assert "error" in execute(ctx(box), "read_file", {"path": "/etc/passwd"}).text
-    assert box.commands == []
-    box.on("awk", ok("     1\thi\n"))
-    assert "hi" in execute(ctx(box), "read_file", {"path": f"{HISTORY_DIR}/0001/patch.diff"}).text
-
-
-def test_search_defaults_to_repo_and_reports_no_matches() -> None:
-    box = FakeBox().on("grep", lambda cmd: ok("") if REPO_DIR in cmd else fail())
-    r = execute(ctx(box), "search", {"pattern": "def clustering"})
-    assert r.text == "(no matches)"
-    assert "-e 'def clustering'" in box.commands[-1]
-
-
-def test_edit_file_requires_exactly_one_match() -> None:
-    box = FakeBox()
-    path = f"{REPO_DIR}/x.py"
-    box.write(path, b"a = 1\nb = 1\n")
-    r = execute(ctx(box), "edit_file", {"path": "x.py", "old": "= 1", "new": "= 2"})
-    assert "occurs 2 times" in r.text
-    assert box.read(path) == b"a = 1\nb = 1\n"
-    r = execute(ctx(box), "edit_file", {"path": "x.py", "old": "a = 1", "new": "a = 2"})
-    assert r.text == f"edited {path}"
-    assert box.read(path) == b"a = 2\nb = 1\n"
-    assert (
-        "error"
-        in execute(ctx(box), "edit_file", {"path": "missing.py", "old": "a", "new": "b"}).text
-    )
-
-
-def test_write_file() -> None:
-    box = FakeBox()
-    r = execute(ctx(box), "write_file", {"path": "new.py", "content": "print(1)\n"})
-    assert "wrote 9 characters" in r.text
-    assert box.read(f"{REPO_DIR}/new.py") == b"print(1)\n"
+def test_the_shell_description_tells_the_agent_where_it_is() -> None:
+    """With no path resolving tool left, the description is the only thing that
+    says where a command starts and how much output survives."""
+    shell_spec = next(s for s in TOOL_SPECS if s["function"]["name"] == "shell")
+    description = shell_spec["function"]["description"]
+    assert REPO_DIR in description and "12000" in description
 
 
 def test_run_tests_module_and_full_scopes() -> None:

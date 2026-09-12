@@ -273,7 +273,7 @@ class Measurement:
     patched_fp: str = ""
     canary_s: float | None = None
     pairs: tuple[PairTiming, ...] = ()
-    median_ratio: float | None = None
+    speedup: float | None = None
     ir: IrCounts | None = None
     errors: tuple[str, ...] = ()
     provenance: Provenance = field(default_factory=Provenance)
@@ -297,8 +297,8 @@ class Measurement:
             and not self.scope_violations
             and self.tests_pass
             and self.result_matches is True
-            and self.median_ratio is not None
-            and self.median_ratio >= self.noise_floor
+            and self.speedup is not None
+            and self.speedup >= self.noise_floor
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -314,7 +314,7 @@ class Measurement:
             "result_matches": self.result_matches,
             "canary_s": self.canary_s,
             "pairs": [p.to_dict() for p in self.pairs],
-            "median_ratio": self.median_ratio,
+            "speedup": self.speedup,
             "clears_noise": self.clears_noise,
             "ir": None if self.ir is None else self.ir.to_dict(),
             "errors": list(self.errors),
@@ -325,7 +325,7 @@ class Measurement:
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Measurement:
         ir = d.get("ir")
-        median = d.get("median_ratio")
+        median = d.get("speedup")
         canary = d.get("canary_s")
         return cls(
             noise_floor=float(d["noise_floor"]),
@@ -337,7 +337,7 @@ class Measurement:
             patched_fp=str(d.get("patched_fp", "")),
             canary_s=None if canary is None else float(canary),
             pairs=tuple(PairTiming.from_dict(p) for p in d.get("pairs", [])),
-            median_ratio=None if median is None else float(median),
+            speedup=None if median is None else float(median),
             ir=None if ir is None else IrCounts.from_dict(ir),
             errors=tuple(str(e) for e in d.get("errors", [])),
             provenance=Provenance.from_dict(d.get("provenance", {})),

@@ -24,7 +24,7 @@ RAW = {
                     {
                         "id": "call_1",
                         "type": "function",
-                        "function": {"name": "read_file", "arguments": '{"path": "a.py"}'},
+                        "function": {"name": "shell", "arguments": '{"cmd": "cat a.py"}'},
                     }
                 ],
             },
@@ -41,8 +41,8 @@ RAW = {
 
 def test_parse_response_reads_tool_calls_usage_and_echo() -> None:
     r = parse_response(RAW, 1.5)
-    assert r.tool_calls[0].name == "read_file"
-    assert r.tool_calls[0].arguments == {"path": "a.py"}
+    assert r.tool_calls[0].name == "shell"
+    assert r.tool_calls[0].arguments == {"cmd": "cat a.py"}
     assert r.tool_calls[0].id == "call_1"
     assert r.usage == Usage(387, 256, 126, 76)
     assert r.reasoning == "let me look"

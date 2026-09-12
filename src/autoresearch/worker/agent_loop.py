@@ -1,11 +1,11 @@
 """The agent loop worker: a fresh box, a conversation with tools, one diff out.
 
 Per attempt: create a box from the image, check its repo out at the run's base
-commit, make a second worktree of the same commit for the benchmark tool, upload
-the guest programs and the history, then loop: ask the model, run the tools it
-asks for, append the results, until it submits or a cap trips. The box is
-terminated on every exit path. The patch is ``git diff`` of the repo, never
-model text.
+commit, add a read only worktree of the same commit for the benchmark to compare
+against, upload the guest programs and the history, then loop: ask the model, run
+the tools it asks for, append the results, until it submits or a cap trips. The
+box is terminated on every exit path. The patch is ``git diff`` of the repo,
+never model text.
 
 Caps and kill rules, each recorded as the stop reason:
 - max_turns, max_seconds, max_input_tokens from the config
@@ -17,18 +17,19 @@ Caps and kill rules, each recorded as the stop reason:
 from __future__ import annotations
 
 import json
+import tempfile
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from autoresearch import observe
-from autoresearch.boxes.image import GUEST_DIR, REPO_DIR
+from autoresearch.boxes.image import BASE_DIR, GUEST_DIR, HISTORY_DIR, REPO_DIR
 from autoresearch.boxes.protocol import Box, BoxError, BoxFactory
 from autoresearch.config import RunConfig
 from autoresearch.model.protocol import ChatModel, Message, ModelError, ToolCall
 from autoresearch.observe import NullTracer, Tracer
-from autoresearch.types import Prediction, StopReason, Usage, WorkerOutput
+from autoresearch.types import Attempt, Prediction, StopReason, Usage, WorkerOutput
 from autoresearch.worker import prompt, tools
 from autoresearch.worker.protocol import WorkerInput
 
@@ -78,11 +79,20 @@ class AgentLoopWorker:
         box.upload_dir(GUEST_SOURCE, GUEST_DIR)
         # The image cloned the repo at the base commit. Check it out explicitly and
         # confirm HEAD, so a stale image or a wrong config cannot go unnoticed.
+        #
+        # Both trees are byte compiled before the base worktree is made read only.
+        # Order matters twice over. Python writes __pycache__ into the tree it
+        # imports, so a base tree made read only while cold would recompile on
+        # every launch and look slower than the working tree, which biases
+        # run_benchmark in the agent's favour. Compiling both also removes the
+        # cold start that used to fall on whichever tree ran first.
         r = box.run(
             f"cd {REPO_DIR} && git checkout -q --detach {inp.base_sha}"
             f" && git rev-parse HEAD"
-            f" && rm -rf {tools.BASE_DIR} && git worktree prune"
-            f" && git worktree add -q --detach {tools.BASE_DIR} HEAD",
+            f" && rm -rf {BASE_DIR} && git worktree prune"
+            f" && git worktree add -q --detach {BASE_DIR} HEAD"
+            f" && python3 -m compileall -q {REPO_DIR} {BASE_DIR} > /dev/null"
+            f" && chmod -R a-w {BASE_DIR}",
             timeout=SETUP_TIMEOUT,
         )
         if not r.ok:
@@ -90,15 +100,49 @@ class AgentLoopWorker:
         head = r.stdout.split()[0] if r.stdout.split() else ""
         if head != inp.base_sha:
             raise BoxError(f"worker box is at {head}, not the base {inp.base_sha}")
-        for a in inp.history:
-            d = f"{tools.HISTORY_DIR}/{a.ref.dirname}"
-            box.write(f"{d}/summary.md", prompt.render_attempt(a).encode())
+        self._upload_history(box, inp.history)
+
+    @staticmethod
+    def _history_files(history: tuple[Attempt, ...]) -> dict[str, bytes]:
+        """Raw artifacts only, keyed by path relative to the history directory.
+
+        The diff, the measurement and the earlier worker's own words. No harness
+        written summary: the prompt carries the index, and a summary here would
+        be a third copy of the patch.
+        """
+        files: dict[str, bytes] = {}
+        for a in history:
+            d = a.ref.dirname
             if a.patch:
-                box.write(f"{d}/patch.diff", a.patch.encode())
+                files[f"{d}/patch.diff"] = a.patch.encode()
             if a.measurement is not None:
-                box.write(
-                    f"{d}/measurement.json", json.dumps(a.measurement.to_dict(), indent=1).encode()
-                )
+                files[f"{d}/measurement.json"] = json.dumps(
+                    a.measurement.to_dict(), indent=1
+                ).encode()
+            if a.rationale.strip() or a.prediction is not None:
+                predicted = "unknown" if a.prediction is None else f"{a.prediction.speedup:.2f}x"
+                files[f"{d}/rationale.md"] = (
+                    f"Predicted speedup: {predicted}\n\n{a.rationale.strip()}\n"
+                ).encode()
+        return files
+
+    def _upload_history(self, box: Box, history: tuple[Attempt, ...]) -> None:
+        """One upload, not one call per file.
+
+        A write per file is three round trips per attempt, so a width 16 run at
+        round 32 would spend around 1500 of them before the agent's first turn.
+        The tree is staged locally and sent in a single upload instead.
+        """
+        files = self._history_files(history)
+        if not files:
+            return
+        with tempfile.TemporaryDirectory() as tmp:
+            staging = Path(tmp)
+            for name, data in files.items():
+                path = staging / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            box.upload_dir(staging, HISTORY_DIR)
 
     def _collect_patch(self, box: Box) -> str:
         # No pathspec. The pristine baseline worktree is a sibling of the repo,

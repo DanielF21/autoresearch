@@ -31,7 +31,7 @@ def config() -> RunConfig:
 def prepare(box: FakeBox, role: str) -> None:
     box.on("git checkout -q --detach", ok(f"{BASE_SHA}\n"))
     box.on("git add -N", ok(DIFF))
-    box.on("awk", ok("     1\tdef f(): pass\n"))
+    box.on("cat -n", ok("     1\tdef f(): pass\n"))
 
 
 def make_input(config: RunConfig) -> WorkerInput:
@@ -60,7 +60,7 @@ def run_attempt(
 def submit_script() -> list[Scripted]:
     """A function, not a constant: FakeChatModel pops its script as it goes."""
     return [
-        tool_call("read_file", {"path": "networkx/algorithms/cluster.py"}),
+        tool_call("shell", {"cmd": "cat -n networkx/algorithms/cluster.py"}),
         tool_call("submit", {"predicted_speedup": 1.3, "rationale": "why"}),
     ]
 
@@ -82,7 +82,7 @@ def test_a_submitted_attempt_emits_one_trace_in_order(config: RunConfig) -> None
     # Turn one sends the system and user messages; turn two sends only what was
     # added since, which is why a long history is not resent eighty times.
     assert [c[1][:2] for c in trace.calls if c[0] == "model_turn"] == [(1, 2), (2, 4)]
-    assert [c[1] for c in trace.calls if c[0] == "tool"] == [(1, "read_file"), (2, "submit")]
+    assert [c[1] for c in trace.calls if c[0] == "tool"] == [(1, "shell"), (2, "submit")]
 
 
 @pytest.mark.parametrize(
@@ -90,7 +90,7 @@ def test_a_submitted_attempt_emits_one_trace_in_order(config: RunConfig) -> None
     [
         ([text("no tools here"), text("still none")], "no_progress"),
         (
-            [tool_call("read_file", {"path": "a"})] * 3,
+            [tool_call("shell", {"cmd": "cat -n a"})] * 3,
             "repeated_tool_call",
         ),
     ],
@@ -161,7 +161,7 @@ def test_session_id_groups_a_setting() -> None:
 def test_null_tracer_accepts_every_call() -> None:
     trace = observe.NullTracer().attempt(AttemptRef(1, 1, 0), "t1_w1", BASE_SHA)
     trace.box("sb_1")
-    trace.tool(1, "read_file", {"path": "a"}, "contents")
+    trace.tool(1, "shell", {"cmd": "cat a"}, "contents")
     trace.end(StopReason.SUBMITTED, patch=DIFF)
 
 
@@ -172,10 +172,10 @@ def test_the_langfuse_attempt_maps_turns_and_tools_to_observations() -> None:
     trace = observe.LangfuseAttempt(_client=client, _root=root, _model="deepseek/v4")
 
     trace.box("sb_1")
-    trace.tool(1, "read_file", {"path": "a"}, "contents")
+    trace.tool(1, "shell", {"cmd": "cat a"}, "contents")
     trace.end(StopReason.SUBMITTED, patch=DIFF)
 
-    assert [(c.name, c.as_type) for c in root.children] == [("read_file", "tool")]
+    assert [(c.name, c.as_type) for c in root.children] == [("shell", "tool")]
     assert root.children[0].output == "contents"
     assert root.ended and client.flushed == 1
     assert json.loads(json.dumps(root.output))["stop_reason"] == "submitted"
@@ -186,9 +186,9 @@ def test_a_failing_sdk_is_recorded_and_swallowed() -> None:
     client = _FakeClient()
     root = _Observation("attempt", "span", broken=True)
     trace = observe.LangfuseAttempt(_client=client, _root=root, _model="m")
-    trace.tool(1, "read_file", {"path": "a"}, "contents")
+    trace.tool(1, "shell", {"cmd": "cat a"}, "contents")
     trace.end(StopReason.SUBMITTED)
-    assert any("read_file" in f for f in trace.failures)
+    assert any("shell" in f for f in trace.failures)
 
 
 class _Observation:

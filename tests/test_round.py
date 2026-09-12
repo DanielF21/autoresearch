@@ -64,7 +64,7 @@ def test_width_one_measures_and_records_best_so_far(tmp_path: Path) -> None:
     outcome = run_round(1, cfg, paths, worker, pool)
 
     m = outcome.measurements[0]
-    assert m.clears_noise and m.median_ratio == pytest.approx(1.05)
+    assert m.clears_noise and m.speedup == pytest.approx(1.05)
     rec = outcome.record
     assert rec.round == 1 and rec.attempt_numbers == (1,)
     assert rec.base_sha == BASE_SHA
@@ -118,8 +118,8 @@ def test_width_two_records_both_and_best_is_the_maximum(tmp_path: Path) -> None:
     cfg, paths, pool, factory = start(tmp_path, 2, {"x = best": 1.10, "x = good": 1.05})
     worker = FakeWorker([submitted(diff_for("good")), submitted(diff_for("best"))])
     outcome = run_round(1, cfg, paths, worker, pool)
-    assert outcome.measurements[0].median_ratio == pytest.approx(1.05)
-    assert outcome.measurements[1].median_ratio == pytest.approx(1.10)
+    assert outcome.measurements[0].speedup == pytest.approx(1.05)
+    assert outcome.measurements[1].speedup == pytest.approx(1.10)
     assert outcome.record.clears_noise_numbers == (1, 2)
     assert outcome.record.best_ratio_so_far == pytest.approx(1.10)
     # Each slot measured exactly once, on its own referee box.
@@ -131,7 +131,7 @@ def test_failed_and_slow_patches_are_measured_and_kept(tmp_path: Path) -> None:
     cfg, paths, pool, _ = start(tmp_path, 1, {"x = slow": 0.8})
     outcome = run_round(1, cfg, paths, FakeWorker([submitted(diff_for("slow"))]), pool)
     m = outcome.measurements[0]
-    assert m.median_ratio == pytest.approx(0.8) and not m.clears_noise
+    assert m.speedup == pytest.approx(0.8) and not m.clears_noise
     assert outcome.record.measured_numbers == (1,) and outcome.record.clears_noise_numbers == ()
     assert outcome.record.best_ratio_so_far is None
     assert history.load_history(paths)[0].measurement == m

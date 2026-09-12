@@ -24,7 +24,7 @@ def _measurement(ratio: float | None, tests_ok: bool = True, matches: bool = Tru
         ),
         base_fp="a",
         patched_fp="a" if matches else "b",
-        median_ratio=ratio,
+        speedup=ratio,
     )
 
 
