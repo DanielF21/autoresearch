@@ -7,12 +7,19 @@ and its stderr on failure, so nothing is silently half applied.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 
 class GitError(RuntimeError):
     pass
+
+
+def _git_env() -> dict[str, str]:
+    # The repo is always named explicitly, so inherited GIT_* variables (a git
+    # hook sets GIT_DIR and GIT_INDEX_FILE) must not redirect the command.
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
 def _git(repo: Path, *args: str, input_text: str | None = None) -> str:
@@ -23,6 +30,7 @@ def _git(repo: Path, *args: str, input_text: str | None = None) -> str:
         capture_output=True,
         text=True,
         check=False,
+        env=_git_env(),
     )
     if proc.returncode != 0:
         raise GitError(f"git {' '.join(args)} failed in {repo}: {proc.stderr.strip()}")
@@ -37,6 +45,7 @@ def clone_at(repo_url: str, sha: str, dest: Path, depth: int = 50) -> str:
         capture_output=True,
         text=True,
         check=True,
+        env=_git_env(),
     )
     try:
         _git(dest, "checkout", "-q", sha)
@@ -66,6 +75,7 @@ def applies_cleanly(repo: Path, patch: str) -> bool:
         capture_output=True,
         text=True,
         check=False,
+        env=_git_env(),
     )
     return proc.returncode == 0
 

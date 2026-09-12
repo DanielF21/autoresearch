@@ -51,6 +51,11 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["ARG"]
+# Fakes implement a protocol; unused parameters are the signature, not a bug.
+"src/autoresearch/boxes/fake_box.py" = ["ARG002"]
+"src/autoresearch/model/fake_model.py" = ["ARG002"]
+# Copied unchanged from the Phase 1 measurements so its hashes stay comparable.
+"src/autoresearch/guest/provenance.py" = ["PTH"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -62,6 +67,12 @@ warn_unreachable = true
 [[tool.mypy.overrides]]
 module = "sail.*"
 ignore_missing_imports = true
+
+# Copied unchanged from Phase 1 so its hashes stay comparable with the
+# measurements. It reads Linux only interfaces and predates the type rules.
+[[tool.mypy.overrides]]
+module = "autoresearch.guest.provenance"
+ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
