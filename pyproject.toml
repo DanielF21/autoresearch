@@ -21,6 +21,7 @@ dev = [
     "mypy>=1.11",
     "pytest>=8",
     "pre-commit>=3.8",
+    "matplotlib>=3.11.2",
 ]
 
 [build-system]
