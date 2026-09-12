@@ -96,6 +96,12 @@ def test_happy_path_submits_a_diff(config: RunConfig) -> None:
     assert any(BASE_DIR in c for c in box.commands)
     assert ("/workspace/guest/provenance.py") in box.files
 
+    # A git pathspec is repository relative. Naming the sibling baseline
+    # worktree by absolute path made git refuse the diff and lost a whole
+    # attempt in check 2, so the collect command carries no pathspec at all.
+    collect = next(c for c in box.commands if "git diff" in c)
+    assert collect == f"cd {REPO_DIR} && git add -N . && git diff --binary"
+
     first = model.requests[0]
     assert first[0]["role"] == "system"
     assert "cluster.py:160 82% self time" in first[1]["content"]

@@ -17,7 +17,6 @@ Caps and kill rules, each recorded as the stop reason:
 from __future__ import annotations
 
 import json
-import shlex
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,10 +92,11 @@ class AgentLoopWorker:
                 )
 
     def _collect_patch(self, box: Box) -> str:
-        r = box.run(
-            f"cd {REPO_DIR} && git add -N . && git diff --binary -- . ':(exclude){shlex.quote(tools.BASE_DIR)}'",
-            timeout=120,
-        )
+        # No pathspec. The pristine baseline worktree is a sibling of the repo,
+        # not a directory inside it, so a diff run here cannot reach it. Git
+        # pathspecs are repository relative, so naming it by absolute path is an
+        # error rather than a no op.
+        r = box.run(f"cd {REPO_DIR} && git add -N . && git diff --binary", timeout=120)
         if not r.ok:
             raise BoxError(f"git diff failed: {r.stderr[-500:]}")
         return r.stdout

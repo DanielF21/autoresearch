@@ -17,7 +17,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from autoresearch import history
+from autoresearch import env, history
 from autoresearch.config import RunConfig, load_config
 from autoresearch.orchestrator import status as status_mod
 
@@ -55,6 +55,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     from autoresearch.orchestrator.round import profile_docs_from_repo
     from autoresearch.worker.agent_loop import AgentLoopWorker
 
+    env.load_dotenv()
     cfg = _load(args.config)
     root = Path(args.repo_root).resolve()
     run_dir = Path(args.runs_root) / cfg.run_id if args.runs_root else cfg.run_dir
@@ -73,6 +74,7 @@ def cmd_measure(args: argparse.Namespace) -> int:
     from autoresearch.boxes.sail_box import SailBoxFactory
     from autoresearch.referee.referee import Referee
 
+    env.load_dotenv()
     cfg = _load(args.config)
     boxes = SailBoxFactory(cfg)
     ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")

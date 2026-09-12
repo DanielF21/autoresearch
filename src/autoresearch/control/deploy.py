@@ -20,6 +20,14 @@ from autoresearch.config import RunConfig
 
 PACKAGE_DIR = "/workspace/autoresearch"
 CONTROL_RECORD = Path("runs") / "control.json"
+
+# Sail's interpreter installs console scripts to a directory that is not on the
+# box's PATH, so `autoresearch ...` is not callable there. Everything inside a
+# box goes through the same interpreter that does the install: it is resolved
+# once per command, so no state has to be carried between commands, and the
+# package is guaranteed importable by whatever installed it.
+PYTHON = '"$(command -v python3 || command -v python)"'
+CLI = f"{PYTHON} -m autoresearch"
 UPLOAD_IGNORE = (
     ".git",
     ".venv",
@@ -83,7 +91,8 @@ def deploy(
         _staging_copy(repo_root, staging)
         box.upload_dir(staging, PACKAGE_DIR)
         r = box.run(
-            f"cd {PACKAGE_DIR} && pip install -q -e . && autoresearch --help >/dev/null && echo installed",
+            f"cd {PACKAGE_DIR} && {PYTHON} -m pip install -q -e . "
+            f"&& {CLI} --help >/dev/null && echo installed",
             timeout=900,
         )
         if not r.ok or "installed" not in r.stdout:
@@ -106,7 +115,7 @@ def launch_command(config: RunConfig, config_path: str, until: int | None = None
     log = f"{config.storage.mount}/runs/{config.run_id}.launch.log"
     stop = f" --until {until}" if until is not None else ""
     return (
-        f"cd {PACKAGE_DIR} && nohup autoresearch run {config_path} --repo-root {PACKAGE_DIR}"
+        f"cd {PACKAGE_DIR} && nohup {CLI} run {config_path} --repo-root {PACKAGE_DIR}"
         f"{stop} >> {log} 2>&1 &"
     )
 
@@ -122,7 +131,7 @@ def launch(
 
 def remote_status(config: RunConfig, box: Box) -> str:
     run_dir = f"{config.storage.mount}/runs/{config.run_id}"
-    r = box.run(f"cd {PACKAGE_DIR} && autoresearch status {run_dir}", timeout=120)
+    r = box.run(f"cd {PACKAGE_DIR} && {CLI} status {run_dir}", timeout=120)
     if not r.ok:
         return f"status failed (rc {r.exit_code}): {r.stderr[-800:] or r.stdout[-800:]}"
     return r.stdout

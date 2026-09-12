@@ -4,37 +4,22 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import os
 import tempfile
 from pathlib import Path
 
+from autoresearch import env
 from autoresearch.config import load_config
 from autoresearch.control import deploy as ctl
 
 
-def _factory(config_path: str) -> tuple[object, object]:
-    from autoresearch.boxes.sail_box import SailBoxFactory
-
-    cfg = load_config(Path(config_path))
-    return cfg, SailBoxFactory(cfg)
-
-
 def _api_key() -> str:
-    key = os.environ.get("SAIL_API_KEY", "")
-    if not key:
-        env = Path(".env")
-        if env.exists():
-            for line in env.read_text().splitlines():
-                if line.startswith("SAIL_API_KEY="):
-                    key = line.split("=", 1)[1].strip().strip("'\"")
-    if not key:
-        raise SystemExit("SAIL_API_KEY is not set and .env has no SAIL_API_KEY line")
-    return key
+    return env.api_key()
 
 
 def cmd_deploy(args: argparse.Namespace) -> int:
     from autoresearch.boxes.sail_box import SailBoxFactory
 
+    env.load_dotenv()
     cfg = load_config(Path(args.config))
     boxes = SailBoxFactory(cfg)
     name = f"control-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}"
@@ -49,6 +34,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
 def _control_box(config_path: str) -> tuple[object, object]:
     from autoresearch.boxes.sail_box import SailBoxFactory
 
+    env.load_dotenv()
     cfg = load_config(Path(config_path))
     info = ctl.load_control()
     box = SailBoxFactory(cfg).reattach(info.box_id)

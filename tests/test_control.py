@@ -64,15 +64,44 @@ def test_launch_starts_a_detached_run_with_the_key_only_in_env() -> None:
     box = FakeBox()
     cmd = ctl.launch(CFG, "configs/t1_w1.toml", box, "sk_secret")
     assert box.started == [(cmd, {"SAIL_API_KEY": "sk_secret"})]
-    assert cmd.startswith(f"cd {ctl.PACKAGE_DIR} && nohup autoresearch run configs/t1_w1.toml")
+    assert cmd.startswith(f"cd {ctl.PACKAGE_DIR} && nohup {ctl.CLI} run configs/t1_w1.toml")
     assert "/mnt/autoresearch/runs/t1_w1.launch.log" in cmd and cmd.endswith("&")
     assert "sk_secret" not in cmd
     cmd = ctl.launch(CFG, "configs/t1_w1.toml", FakeBox(), "k", until=1)
     assert " --until 1 >>" in cmd
 
 
+def test_nothing_in_a_box_calls_the_console_script(tmp_path: Path) -> None:
+    """The script is not on a box's PATH. Every in box command goes through ``-m``.
+
+    This is what broke the first deploy: pip installed the entry point to a
+    directory the shell could not see.
+    """
+
+    def prepare(box: FakeBox, role: str) -> None:
+        box.on("pip install", ok("installed\n"))
+        box.on("mkdir -p", ok("runs\n"))
+
+    box = FakeBox().on("-m autoresearch status", ok(""))
+    factory = FakeBoxFactory(prepare=prepare)
+    ctl.deploy(CFG, factory, _repo(tmp_path), tmp_path / "staging", "control-x")
+    ctl.remote_status(CFG, box)
+    commands = [
+        *factory.created[0].commands,
+        *box.commands,
+        ctl.launch_command(CFG, "configs/t1_w1.toml"),
+    ]
+    for cmd in commands:
+        tokens = cmd.split()
+        for i, token in enumerate(tokens):
+            # Bare "autoresearch" is the console script. Paths and the volume
+            # name are other tokens and are not what this guards.
+            if token == "autoresearch":
+                assert i > 0 and tokens[i - 1] == "-m", cmd
+
+
 def test_remote_status_and_fetch(tmp_path: Path) -> None:
-    box = FakeBox().on("autoresearch status", ok("run t1_w1: 3 of 32 rounds\n"))
+    box = FakeBox().on("-m autoresearch status", ok("run t1_w1: 3 of 32 rounds\n"))
     assert "3 of 32" in ctl.remote_status(CFG, box)
     box.files["/mnt/autoresearch/runs/t1_w1/rounds.jsonl"] = b"{}\n"
     local = ctl.fetch(CFG, box, tmp_path / "runs")
