@@ -110,81 +110,81 @@ referee,1,verify,2.54
 referee,1,canary,1.422
 referee,1,timing base,59.237
 referee,1,timing patched,25.8
-referee,1,"instruction counts, setup, cleanup",96.495
+referee,1,setup and cleanup,96.495
 referee,2,module tests,4.152
 referee,2,full suite,57.949
 referee,2,verify,2.02
 referee,2,canary,1.402
 referee,2,timing base,59.138
 referee,2,timing patched,4.746
-referee,2,"instruction counts, setup, cleanup",85.768
+referee,2,setup and cleanup,85.768
 referee,3,module tests,4.408
 referee,3,full suite,57.583
 referee,3,verify,2.023
 referee,3,canary,1.378
 referee,3,timing base,59.19
 referee,3,timing patched,4.737
-referee,3,"instruction counts, setup, cleanup",85.286
+referee,3,setup and cleanup,85.286
 referee,4,module tests,4.281
 referee,4,full suite,58.08
 referee,4,verify,2.039
 referee,4,canary,1.381
 referee,4,timing base,59.59
 referee,4,timing patched,4.546
-referee,4,"instruction counts, setup, cleanup",85.929
+referee,4,setup and cleanup,85.929
 referee,5,module tests,1.61
 referee,5,full suite,56.58
 referee,5,verify,2.002
 referee,5,canary,1.416
 referee,5,timing base,58.686
 referee,5,timing patched,3.679
-referee,5,"instruction counts, setup, cleanup",85.017
+referee,5,setup and cleanup,85.017
 referee,6,module tests,1.399
 referee,6,full suite,60.298
 referee,6,verify,2.041
 referee,6,canary,1.395
 referee,6,timing base,59.485
 referee,6,timing patched,4.199
-referee,6,"instruction counts, setup, cleanup",89.769
+referee,6,setup and cleanup,89.769
 referee,7,module tests,1.56
 referee,7,full suite,59.537
 referee,7,verify,2.007
 referee,7,canary,1.426
 referee,7,timing base,59.329
 referee,7,timing patched,3.05
-referee,7,"instruction counts, setup, cleanup",1868.767
+referee,7,setup and cleanup,1868.767
 referee,8,module tests,1.419
 referee,8,full suite,58.095
 referee,8,verify,2.038
 referee,8,canary,1.373
 referee,8,timing base,58.911
 referee,8,timing patched,4.783
-referee,8,"instruction counts, setup, cleanup",1867.649
+referee,8,setup and cleanup,1867.649
 referee,9,module tests,1.481
 referee,9,full suite,56.94
 referee,9,verify,1.986
 referee,9,canary,1.382
 referee,9,timing base,59.15
 referee,9,timing patched,3.02
-referee,9,"instruction counts, setup, cleanup",1866.188
+referee,9,setup and cleanup,1866.188
 referee,10,module tests,1.498
 referee,10,full suite,56.847
 referee,10,verify,1.977
 referee,10,canary,1.389
 referee,10,timing base,58.85
 referee,10,timing patched,2.602
-referee,10,"instruction counts, setup, cleanup",2971.661
+referee,10,setup and cleanup,2971.661
 referee,11,module tests,1.452
 referee,11,full suite,59.494
 referee,11,verify,2.0
 referee,11,canary,1.402
 referee,11,timing base,59.671
 referee,11,timing patched,2.671
-referee,11,"instruction counts, setup, cleanup",1867.041
+referee,11,setup and cleanup,1867.041
 referee,12,module tests,1.446
 referee,12,full suite,58.856
 referee,12,verify,1.993
 referee,12,canary,1.435
 referee,12,timing base,59.647
 referee,12,timing patched,2.543
-referee,12,"instruction counts, setup, cleanup",2967.915
+referee,12,setup and cleanup,2967.915

@@ -12,12 +12,15 @@ four moments the transcript is appended to, so those moments leave the process
 as they happen.
 
 Nothing here may break a run. Every call into the platform is wrapped: a failure
-is counted and reported once at the end of the attempt, never raised.
+is counted and reported once at the end of the attempt, never raised. A call
+that is slow rather than failing is bounded too, because slow is the shape the
+failure actually took: see ``FLUSH_TIMEOUT_S``.
 """
 
 from __future__ import annotations
 
 import os
+import threading
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -28,6 +31,13 @@ from autoresearch.model.protocol import Message, ModelResponse
 from autoresearch.types import AttemptRef, Prediction, StopReason
 
 REQUIRED_KEYS = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
+
+# How long an attempt will wait for its trace to reach the platform before
+# giving up on it. In t1_w4b three of twelve workers lost about forty seconds
+# each to a blocking ``flush``: the exporter met a five second read timeout and
+# retried with backoff, and because a slow call raises nothing, the try/except
+# around it never fired. 121 seconds of experiment for zero traces.
+FLUSH_TIMEOUT_S = 5.0
 
 
 class AttemptTrace(Protocol):
@@ -151,6 +161,34 @@ class LangfuseAttempt:
         except Exception as e:
             self._failures.append(f"{what}: {e!r}")
 
+    def _try_bounded(self, what: str, fn: Callable[[], None], timeout: float) -> None:
+        """``_try``, but it also gives up on a call that is merely slow.
+
+        The thread is left running as a daemon rather than killed, since there
+        is no safe way to interrupt a socket read inside the SDK. It finishes or
+        it dies with the process; either way the attempt has already moved on.
+        """
+        caught: list[str] = []
+
+        def run() -> None:
+            try:
+                fn()
+            except Exception as e:
+                caught.append(f"{what}: {e!r}")
+
+        t = threading.Thread(target=run, name=f"langfuse-{what}", daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            # Nothing downstream reads ``_failures`` after this point, and the
+            # trace this would annotate is the one that failed to send, so the
+            # only place this can be seen is the run's launch log.
+            msg = f"{what}: still running after {timeout:.0f}s, abandoned"
+            self._failures.append(msg)
+            print(f"tracing: {msg}", flush=True)
+        else:
+            self._failures.extend(caught)
+
     def box(self, box_id: str) -> None:
         self._try("box", lambda: self._root.update(metadata={"box_id": box_id}))
 
@@ -227,7 +265,9 @@ class LangfuseAttempt:
             self._try("end scope", lambda: self._scope.__exit__(None, None, None))
         # The control box can be terminated as soon as a run ends, so nothing
         # may sit in the background queue waiting for a flush that never comes.
-        self._try("flush", self._client.flush)
+        # Bounded, because this is the call that blocked three workers in
+        # t1_w4b: a trace may be lost, an attempt may not be held up.
+        self._try_bounded("flush", self._client.flush, FLUSH_TIMEOUT_S)
 
     @property
     def failures(self) -> tuple[str, ...]:

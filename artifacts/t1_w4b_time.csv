@@ -1,0 +1,192 @@
+side,attempt,category,seconds
+worker,1,box create,0.82
+worker,1,box prepare,4.459
+worker,1,model,174.545
+worker,1,tools,44.902
+worker,1,harness,0.084
+worker_tool,1,shell,27.738
+worker_tool,1,run_tests,6.122
+worker_tool,1,run_benchmark,11.042
+worker_tool,1,submit,0.0
+worker,2,box create,0.862
+worker,2,box prepare,4.445
+worker,2,model,105.819
+worker,2,tools,29.198
+worker,2,harness,0.077
+worker_tool,2,shell,13.224
+worker_tool,2,run_tests,2.91
+worker_tool,2,run_benchmark,13.063
+worker_tool,2,submit,0.0
+worker,3,box create,0.817
+worker,3,box prepare,4.413
+worker,3,model,106.701
+worker,3,tools,35.269
+worker,3,harness,0.084
+worker_tool,3,shell,2.161
+worker_tool,3,run_benchmark,28.263
+worker_tool,3,run_tests,4.844
+worker_tool,3,submit,0.0
+worker,4,box create,0.809
+worker,4,box prepare,4.5
+worker,4,model,138.078
+worker,4,tools,62.777
+worker,4,harness,0.084
+worker_tool,4,shell,31.898
+worker_tool,4,run_benchmark,27.685
+worker_tool,4,run_tests,3.194
+worker_tool,4,submit,0.0
+worker,5,box create,0.889
+worker,5,box prepare,3.328
+worker,5,model,304.583
+worker,5,tools,44.519
+worker,5,harness,0.129
+worker_tool,5,shell,23.578
+worker_tool,5,run_benchmark,20.089
+worker_tool,5,run_tests,0.852
+worker_tool,5,submit,0.0
+worker,6,box create,0.683
+worker,6,box prepare,3.31
+worker,6,model,366.022
+worker,6,tools,60.526
+worker,6,harness,0.148
+worker_tool,6,shell,40.104
+worker_tool,6,run_benchmark,19.627
+worker_tool,6,run_tests,0.794
+worker_tool,6,submit,0.0
+worker,7,box create,2.445
+worker,7,box prepare,6.299
+worker,7,model,582.796
+worker,7,tools,243.836
+worker,7,harness,0.168
+worker_tool,7,shell,206.772
+worker_tool,7,run_tests,4.684
+worker_tool,7,run_benchmark,32.379
+worker_tool,7,submit,0.0
+worker,8,box create,2.45
+worker,8,box prepare,6.408
+worker,8,model,407.021
+worker,8,tools,132.638
+worker,8,harness,0.126
+worker_tool,8,shell,65.415
+worker_tool,8,run_tests,10.374
+worker_tool,8,run_benchmark,56.849
+worker_tool,8,submit,0.0
+worker,9,box create,0.634
+worker,9,box prepare,3.149
+worker,9,model,366.741
+worker,9,tools,114.01
+worker,9,harness,41.959
+worker_tool,9,shell,40.946
+worker_tool,9,run_tests,4.555
+worker_tool,9,run_benchmark,68.509
+worker_tool,9,submit,0.0
+worker,10,box create,0.648
+worker,10,box prepare,3.545
+worker,10,model,352.057
+worker,10,tools,365.219
+worker,10,harness,42.534
+worker_tool,10,shell,264.015
+worker_tool,10,run_benchmark,98.638
+worker_tool,10,run_tests,2.566
+worker_tool,10,submit,0.0
+worker,11,box create,0.645
+worker,11,box prepare,3.486
+worker,11,model,364.441
+worker,11,tools,508.339
+worker,11,harness,0.136
+worker_tool,11,shell,412.219
+worker_tool,11,run_tests,5.616
+worker_tool,11,run_benchmark,90.504
+worker_tool,11,submit,0.0
+worker,12,box create,0.622
+worker,12,box prepare,3.193
+worker,12,model,423.066
+worker,12,tools,597.613
+worker,12,harness,35.546
+worker_tool,12,shell,530.524
+worker_tool,12,run_tests,6.537
+worker_tool,12,run_benchmark,60.552
+referee,1,module tests,3.846
+referee,1,full suite,59.475
+referee,1,verify,2.078
+referee,1,canary,1.43
+referee,1,timing base,59.967
+referee,1,timing patched,5.664
+referee,1,setup and cleanup,4.284
+referee,2,module tests,4.013
+referee,2,full suite,57.344
+referee,2,verify,2.544
+referee,2,canary,1.421
+referee,2,timing base,59.469
+referee,2,timing patched,25.793
+referee,2,setup and cleanup,4.182
+referee,3,module tests,3.902
+referee,3,full suite,57.499
+referee,3,verify,2.068
+referee,3,canary,1.408
+referee,3,timing base,59.636
+referee,3,timing patched,5.624
+referee,3,setup and cleanup,5.573
+referee,4,module tests,3.963
+referee,4,full suite,57.043
+referee,4,verify,2.057
+referee,4,canary,1.402
+referee,4,timing base,60.243
+referee,4,timing patched,4.739
+referee,4,setup and cleanup,5.766
+referee,5,module tests,1.413
+referee,5,full suite,56.331
+referee,5,verify,2.045
+referee,5,canary,1.414
+referee,5,timing base,60.204
+referee,5,timing patched,4.377
+referee,5,setup and cleanup,8.677
+referee,6,module tests,1.449
+referee,6,full suite,54.384
+referee,6,verify,2.051
+referee,6,canary,1.404
+referee,6,timing base,60.98
+referee,6,timing patched,4.158
+referee,6,setup and cleanup,8.657
+referee,7,module tests,1.455
+referee,7,full suite,54.574
+referee,7,verify,2.046
+referee,7,canary,1.401
+referee,7,timing base,60.463
+referee,7,timing patched,4.61
+referee,7,setup and cleanup,8.543
+referee,8,module tests,1.539
+referee,8,full suite,57.634
+referee,8,verify,2.024
+referee,8,canary,1.42
+referee,8,timing base,60.831
+referee,8,timing patched,3.17
+referee,8,setup and cleanup,7.784
+referee,9,module tests,1.439
+referee,9,full suite,54.291
+referee,9,verify,1.987
+referee,9,canary,1.376
+referee,9,timing base,58.75
+referee,9,timing patched,2.877
+referee,9,setup and cleanup,73.657
+referee,10,module tests,1.478
+referee,10,full suite,56.649
+referee,10,verify,2.009
+referee,10,canary,1.393
+referee,10,timing base,60.727
+referee,10,timing patched,2.648
+referee,10,setup and cleanup,9.331
+referee,11,module tests,1.448
+referee,11,full suite,57.098
+referee,11,verify,1.993
+referee,11,canary,1.403
+referee,11,timing base,60.315
+referee,11,timing patched,3.123
+referee,11,setup and cleanup,7.483
+referee,12,module tests,1.422
+referee,12,full suite,53.854
+referee,12,verify,2.02
+referee,12,canary,1.433
+referee,12,timing base,61.247
+referee,12,timing patched,3.178
+referee,12,setup and cleanup,9.955

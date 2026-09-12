@@ -5,6 +5,8 @@ tracer that fails changes nothing about what the attempt produces.
 """
 
 import json
+import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -180,6 +182,44 @@ def test_the_langfuse_attempt_maps_turns_and_tools_to_observations() -> None:
     assert root.ended and client.flushed == 1
     assert json.loads(json.dumps(root.output))["stop_reason"] == "submitted"
     assert trace.failures == ()
+
+
+def test_a_flush_that_hangs_does_not_hold_up_the_attempt(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The t1_w4b regression: a slow flush raises nothing, so try/except missed it.
+
+    Three of twelve workers lost about forty seconds each to the exporter
+    retrying a read timeout. Observability may cost a trace, never the run.
+    """
+    monkeypatch.setattr(observe, "FLUSH_TIMEOUT_S", 0.2)
+    released = threading.Event()
+    client = _FakeClient()
+
+    def hang() -> None:
+        released.wait(30)
+
+    client.flush = hang  # type: ignore[method-assign]
+    root = client.start_observation(name="attempt 0009", as_type="span", input={})
+    trace = observe.LangfuseAttempt(_client=client, _root=root, _model="m")
+
+    t0 = time.perf_counter()
+    trace.end(StopReason.SUBMITTED, patch=DIFF)
+    waited = time.perf_counter() - t0
+    released.set()  # let the daemon thread go before the test ends
+
+    assert waited < 5.0, f"end() blocked for {waited:.1f}s on a hanging flush"
+    assert any("abandoned" in f for f in trace.failures), trace.failures
+    assert "tracing: flush" in capsys.readouterr().out
+    assert root.ended  # the span is still closed; only the send was given up on
+
+
+def test_a_flush_that_returns_is_not_reported_as_abandoned() -> None:
+    client = _FakeClient()
+    root = client.start_observation(name="attempt 0001", as_type="span", input={})
+    trace = observe.LangfuseAttempt(_client=client, _root=root, _model="m")
+    trace.end(StopReason.SUBMITTED)
+    assert client.flushed == 1 and trace.failures == ()
 
 
 def test_a_failing_sdk_is_recorded_and_swallowed() -> None:
