@@ -90,10 +90,10 @@ def cmd_judge(args: argparse.Namespace) -> int:
             result = ref.judge(cfg.target.sha, patch)
             entry = {"patch": patch_path, "result": result.to_dict()}
             report.append(entry)
+            ir = "none" if result.ir is None else f"{result.ir.delta_pct:+.2f} pct"
             print(
                 f"  {result.verdict}: {result.reason} "
-                f"(median {result.median_ratio}, ir {None if result.ir is None else result.ir.delta_pct:.2f}"
-                f" pct, {result.wall_s:.0f}s)",
+                f"(median {result.median_ratio}, ir {ir}, {result.wall_s:.0f}s)",
                 flush=True,
             )
             if ref.broken:

@@ -176,8 +176,8 @@ def run_round(
                     median_ratio=results[w].median_ratio,
                 )
                 continue
-            pool.get(w).sync_incumbent(
-                target.sha, incumbent.cumulative_diff(inc, target.sha), incumbent.tree_hash(inc)
+            pool.sync_slot(
+                w, target.sha, incumbent.cumulative_diff(inc, target.sha), incumbent.tree_hash(inc)
             )
             again, err = _judge_one(w, pool, incumbent.head_sha(inc), patch)
             if err:

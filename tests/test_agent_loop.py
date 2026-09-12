@@ -68,7 +68,6 @@ def submit_script() -> list[Scripted]:
 
 def test_happy_path_submits_a_diff(config: RunConfig) -> None:
     factory = FakeBoxFactory(prepare=prepare)
-    factory_box_prep = prepare  # noqa: F841
     model = FakeChatModel(script=submit_script())
     worker = AgentLoopWorker(model, factory, config)
     box_holder: list[FakeBox] = []
@@ -92,6 +91,10 @@ def test_happy_path_submits_a_diff(config: RunConfig) -> None:
     assert box.terminated
     assert box.read(f"{REPO_DIR}/networkx/algorithms/cluster.py") == b"b\n"
     assert box.files["/workspace/incumbent.diff"] == b""
+    setup_cmd = next(c for c in box.commands if "git checkout -q --detach" in c)
+    assert (
+        f"--detach {config.target.sha} " in setup_cmd
+    )  # the pinned commit, never the orchestrator's id
     assert any(BASELINE_DIR in c for c in box.commands)
     assert ("/workspace/guest/provenance.py") in box.files
 

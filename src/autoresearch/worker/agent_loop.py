@@ -73,8 +73,11 @@ class AgentLoopWorker:
             if inp.stack_diff.strip()
             else "true"
         )
+        # The orchestrator's incumbent commit ids do not exist in the box; the box
+        # starts from the pinned commit and replays the accepted stack, then the
+        # tree hash must match.
         r = box.run(
-            f"cd {REPO_DIR} && git checkout -q --detach {inp.incumbent_sha} && {apply}"
+            f"cd {REPO_DIR} && git checkout -q --detach {inp.target.sha} && {apply}"
             f" && git rev-parse 'HEAD^{{tree}}'"
             f" && rm -rf {tools.BASELINE_DIR} && git worktree prune"
             f" && git worktree add -q --detach {tools.BASELINE_DIR} HEAD",
