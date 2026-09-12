@@ -82,35 +82,37 @@ def _guest(ctx: ToolContext, script: str, *args: str, timeout: int) -> dict[str,
     return dict(json.loads(line))
 
 
-def run_tests(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
-    scope = args.get("scope", "module")
-    if scope not in ("module", "full"):
-        raise ToolError("scope must be 'module' or 'full'")
-    if scope == "module":
-        target, workers, timeout = ctx.target.test_file, 1, 300
-    else:
-        target, workers, timeout = ctx.target.hot_file.split("/")[0], 4, 1200
+MODULE_TESTS_TIMEOUT = 300
+
+
+def run_tests(ctx: ToolContext, _args: dict[str, Any]) -> ToolResult:
+    """The hot module's own tests, the only suite the worker runs.
+
+    The whole suite is the referee's job. It runs on every submission and takes
+    about a minute, so a worker running it too only spends its own budget to
+    learn what the referee will establish anyway.
+    """
     rec = _guest(
         ctx,
         "run_tests.py",
         "--root",
         ctx.repo,
         "--target",
-        target,
+        ctx.target.test_file,
         "--scope",
-        scope,
+        "module",
         "--workers",
-        str(workers),
+        "1",
         "--log",
         "/workspace/worker_tests.log",
         "--timeout",
-        str(timeout - 30),
-        timeout=timeout,
+        str(MODULE_TESTS_TIMEOUT - 30),
+        timeout=MODULE_TESTS_TIMEOUT,
     )
     if "error" in rec:
         return ToolResult(f"error: {rec['error']}")
     head = (
-        f"{scope} tests: {'PASSED' if rec.get('ok') else 'FAILED'}: "
+        f"module tests: {'PASSED' if rec.get('ok') else 'FAILED'}: "
         f"{rec.get('passed', 0)} passed, {rec.get('failed', 0)} failed, {rec.get('errors', 0)} errors "
         f"in {float(rec.get('duration_s', 0)):.1f}s"
     )
@@ -206,10 +208,10 @@ def _params(props: dict[str, Any], required: list[str]) -> dict[str, Any]:
 TOOLS: tuple[Tool, ...] = (
     Tool(
         "run_tests",
-        "Run the test suite on your working tree. scope='module' runs the hot module's own "
-        "tests in seconds; scope='full' runs everything in one to two minutes. The referee "
-        "requires both to pass.",
-        _params({"scope": {"type": "string", "enum": ["module", "full"]}}, []),
+        "Run the hot module's own tests on your working tree. Takes seconds. The whole suite "
+        "is not available here: the referee runs it on every submission and requires it to "
+        "pass, so use this while you work and let the referee do the rest.",
+        _params({}, []),
         run_tests,
     ),
     Tool(

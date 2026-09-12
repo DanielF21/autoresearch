@@ -210,25 +210,6 @@ class PairTiming:
 
 
 @dataclass(frozen=True)
-class IrCounts:
-    """Instruction counts from cachegrind for both trees, one call of the target each."""
-
-    base: int
-    patched: int
-
-    @property
-    def delta_pct(self) -> float:
-        return 100.0 * (self.patched - self.base) / self.base
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"base": self.base, "patched": self.patched, "delta_pct": self.delta_pct}
-
-    @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> IrCounts:
-        return cls(base=int(d["base"]), patched=int(d["patched"]))
-
-
-@dataclass(frozen=True)
 class Provenance:
     """Hashes that say which machine and which software produced a measurement."""
 
@@ -274,7 +255,6 @@ class Measurement:
     canary_s: float | None = None
     pairs: tuple[PairTiming, ...] = ()
     speedup: float | None = None
-    ir: IrCounts | None = None
     errors: tuple[str, ...] = ()
     provenance: Provenance = field(default_factory=Provenance)
     wall_s: float = 0.0
@@ -316,7 +296,6 @@ class Measurement:
             "pairs": [p.to_dict() for p in self.pairs],
             "speedup": self.speedup,
             "clears_noise": self.clears_noise,
-            "ir": None if self.ir is None else self.ir.to_dict(),
             "errors": list(self.errors),
             "provenance": self.provenance.to_dict(),
             "wall_s": self.wall_s,
@@ -324,7 +303,9 @@ class Measurement:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Measurement:
-        ir = d.get("ir")
+        # An older record may carry an "ir" block from when the referee ran
+        # cachegrind. It is read past, never rewritten; see
+        # artifacts/instruction_counting.md.
         median = d.get("speedup")
         canary = d.get("canary_s")
         return cls(
@@ -338,7 +319,6 @@ class Measurement:
             canary_s=None if canary is None else float(canary),
             pairs=tuple(PairTiming.from_dict(p) for p in d.get("pairs", [])),
             speedup=None if median is None else float(median),
-            ir=None if ir is None else IrCounts.from_dict(ir),
             errors=tuple(str(e) for e in d.get("errors", [])),
             provenance=Provenance.from_dict(d.get("provenance", {})),
             wall_s=float(d.get("wall_s", 0.0)),

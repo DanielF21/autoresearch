@@ -1,6 +1,5 @@
 from autoresearch.types import (
     AttemptRef,
-    IrCounts,
     Measurement,
     PairTiming,
     Prediction,
@@ -42,10 +41,6 @@ def test_pair_ratio_is_base_over_patched() -> None:
     assert _pair(0, 2.0, 1.0).ratio == 2.0
 
 
-def test_ir_delta_pct() -> None:
-    assert IrCounts(base=1000, patched=900).delta_pct == -10.0
-
-
 def test_measurement_round_trip() -> None:
     m = Measurement(
         noise_floor=1.0106,
@@ -57,13 +52,21 @@ def test_measurement_round_trip() -> None:
         canary_s=0.51,
         pairs=(_pair(0, 1.0, 0.95), _pair(1, 1.0, 0.96, contaminated=True)),
         speedup=1.0526,
-        ir=IrCounts(100, 90),
-        errors=("instruction counts: valgrind missing",),
+        errors=("timing skipped: patched tree cannot run",),
         provenance=Provenance(box_id="sb_x", cpu_flag_hash="abc"),
         wall_s=200.0,
     )
     assert Measurement.from_dict(m.to_dict()) == m
     assert m.tests_pass and m.result_matches is True and m.clears_noise
+
+
+def test_a_record_written_before_instruction_counting_was_retired_still_loads() -> None:
+    # Runs under runs/ carry an "ir" block. The field is gone; the records are not
+    # rewritten, so from_dict has to read past the key rather than fail on it.
+    old = Measurement(noise_floor=1.0106, applied=True, speedup=1.5).to_dict()
+    old["ir"] = {"base": 5801995203, "patched": 610518708, "delta_pct": -89.48}
+    m = Measurement.from_dict(old)
+    assert m.speedup == 1.5 and not hasattr(m, "ir")
 
 
 def test_measurement_minimal_round_trip() -> None:

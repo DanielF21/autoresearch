@@ -4,13 +4,12 @@ The box holds the target repository at ``REPO_DIR``, checked out at the run's
 base commit, and the guest programs at ``GUEST_DIR``. ``measure`` establishes
 every fact it can about a patch against that base, in order: scope, apply,
 module tests, full suite, one verify call of the benchmark on each tree, the
-canary, six timing pairs, instruction counts, cleanup.
+canary, six timing pairs, cleanup.
 
 Nothing stops early. A step that fails records its failure in ``errors`` and the
 next step still runs, with one exception: if the patched tree cannot complete a
-single verify call, timing and instruction counts are skipped, because a patch
-that hangs or crashes would otherwise cost up to two hours of timeouts. The
-tests run regardless.
+single verify call, timing is skipped, because a patch that hangs or crashes
+would otherwise cost twelve launch timeouts. The tests run regardless.
 
 Every step that runs in the box goes through a guest program that prints one
 JSON line, so the referee never parses free text. Anything that goes wrong at
@@ -33,7 +32,6 @@ from autoresearch.config import RunConfig
 from autoresearch.patch import changed_files, scope_violations
 from autoresearch.referee import timing
 from autoresearch.types import (
-    IrCounts,
     Measurement,
     PairTiming,
     Provenance,
@@ -45,7 +43,6 @@ PIN_CORE = 2  # the core every Phase 1 timing ran on
 
 TESTS_TIMEOUT = 1200
 LAUNCH_TIMEOUT = 600
-IR_TIMEOUT = 1800
 SETUP_TIMEOUT = 300
 
 BASE_TREE = f"{WORK_DIR}/base"
@@ -88,7 +85,6 @@ class _Facts:
         self.canary: float | None = None
         self.pairs: tuple[PairTiming, ...] = ()
         self.median: float | None = None
-        self.ir: IrCounts | None = None
         self.errors: list[str] = []
 
     def finish(self, wall_s: float) -> Measurement:
@@ -103,7 +99,6 @@ class _Facts:
             canary_s=self.canary,
             pairs=self.pairs,
             speedup=self.median,
-            ir=self.ir,
             errors=tuple(self.errors),
             provenance=Provenance(box_id=self.box_id),
             wall_s=wall_s,
@@ -191,9 +186,7 @@ class Referee:
                 lambda: setattr(facts, "patched_fp", self._verify(PATCHED_TREE)),
             )
             if not patched_ok:
-                facts.errors.append(
-                    "timing and instruction counts skipped: patched tree cannot run"
-                )
+                facts.errors.append("timing skipped: patched tree cannot run")
                 return facts.finish(time.perf_counter() - t0)
 
             self._step(facts, "canary", lambda: setattr(facts, "canary", self._canary()))
@@ -212,11 +205,6 @@ class Referee:
                 facts.median = timing.median_ratio(pairs)
 
             self._step(facts, "timing", time_it)
-            self._step(
-                facts,
-                "instruction counts",
-                lambda: setattr(facts, "ir", self._instruction_counts()),
-            )
             return facts.finish(time.perf_counter() - t0)
         finally:
             self._cleanup()
@@ -350,25 +338,6 @@ class Referee:
                 )
             )
         return tuple(out)
-
-    def _ir_body(self, tree: str) -> int | None:
-        counts: dict[int, int] = {}
-        for calls in (1, 2):
-            rec = self._guest(
-                "count_ir.py", *self._target_args(tree), "--calls", str(calls), timeout=IR_TIMEOUT
-            )
-            ir = rec.get("ir")
-            if ir is None:
-                raise GuestError(f"cachegrind failed on {tree}: {str(rec.get('error', ''))[:300]}")
-            counts[calls] = int(ir)
-        return counts[2] - counts[1]
-
-    def _instruction_counts(self) -> IrCounts | None:
-        base = self._ir_body(BASE_TREE)
-        patched = self._ir_body(PATCHED_TREE)
-        if base is None or patched is None or base <= 0:
-            return None
-        return IrCounts(base=base, patched=patched)
 
     def _cleanup(self) -> None:
         """Remove both worktrees. A failure marks the referee broken rather than

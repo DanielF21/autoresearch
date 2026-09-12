@@ -4,7 +4,7 @@
     uv run analyze.py runs/t1_w4
     uv run analyze.py runs/t1_w4 --out progress.png --csv table.csv
 
-Prints a table of attempt number, wall clock and instruction count, and draws
+Prints a table of attempt number, wall clock and speedup, and draws
 the running best against attempt number: every measured attempt as a grey dot,
 every attempt that set a new best in green, and a step line through them.
 
@@ -40,7 +40,6 @@ class Row:
 
     number: int
     wall_s: float | None
-    ir: int | None
     speedup: float | None
     clears: bool
     record: bool
@@ -78,10 +77,10 @@ def short_label(a: Attempt) -> str:
     return cut[: cut.rindex(" ")] + "…" if " " in cut else cut + "…"
 
 
-def baseline(attempts: tuple[Attempt, ...]) -> tuple[float | None, int | None]:
-    """The unpatched tree: its wall clock and its instruction count.
+def baseline(attempts: tuple[Attempt, ...]) -> float | None:
+    """The unpatched tree's wall clock.
 
-    Both are constants of the run, since every attempt is measured against the
+    It is a constant of the run, since every attempt is measured against the
     same commit, so the median across attempts is only a defence against one
     contaminated measurement.
     """
@@ -90,11 +89,7 @@ def baseline(attempts: tuple[Attempt, ...]) -> tuple[float | None, int | None]:
         for a in attempts
         if a.measurement is not None and (s := median_base_s(a.measurement)) is not None
     ]
-    irs = [a.measurement.ir.base for a in attempts if a.measurement and a.measurement.ir]
-    return (
-        statistics.median(walls) if walls else None,
-        int(statistics.median(irs)) if irs else None,
-    )
+    return statistics.median(walls) if walls else None
 
 
 def rows(attempts: tuple[Attempt, ...]) -> list[Row]:
@@ -104,7 +99,6 @@ def rows(attempts: tuple[Attempt, ...]) -> list[Row]:
     for a in attempts:
         m = a.measurement
         wall = median_patched_s(m) if m is not None else None
-        ir = m.ir.patched if m is not None and m.ir is not None else None
         speedup = m.speedup if m is not None else None
         clears = a.clears_noise
         record = clears and wall is not None and (best is None or wall < best)
@@ -114,7 +108,6 @@ def rows(attempts: tuple[Attempt, ...]) -> list[Row]:
             Row(
                 number=a.ref.number,
                 wall_s=wall,
-                ir=ir,
                 speedup=speedup,
                 clears=clears,
                 record=record,
@@ -124,31 +117,28 @@ def rows(attempts: tuple[Attempt, ...]) -> list[Row]:
     return out
 
 
-def render_table(table: list[Row], base_wall: float | None, base_ir: int | None) -> str:
+def render_table(table: list[Row], base_wall: float | None) -> str:
     def wall(v: float | None) -> str:
         return "--" if v is None else f"{v:.4f}"
 
-    def ir(v: int | None) -> str:
-        return "--" if v is None else f"{v:,}"
-
-    lines = [f"{'attempt':>7}  {'wall_s':>9}  {'ir':>17}  {'speedup':>8}", "-" * 48]
-    lines.append(f"{0:>7}  {wall(base_wall):>9}  {ir(base_ir):>17}  {'baseline':>8}")
+    lines = [f"{'attempt':>7}  {'wall_s':>9}  {'speedup':>10}", "-" * 32]
+    lines.append(f"{0:>7}  {wall(base_wall):>9}  {'baseline':>10}")
     for r in table:
         mark = " *" if r.record else ""
         speed = "--" if r.speedup is None else f"{r.speedup:.3f}x"
-        lines.append(f"{r.number:>7}  {wall(r.wall_s):>9}  {ir(r.ir):>17}  {speed:>8}{mark}")
+        lines.append(f"{r.number:>7}  {wall(r.wall_s):>9}  {speed:>10}{mark}")
     records = sum(1 for r in table if r.record)
-    lines += ["-" * 48, f"{len(table)} attempts, {records} marked * set a new best"]
+    lines += ["-" * 32, f"{len(table)} attempts, {records} marked * set a new best"]
     return "\n".join(lines)
 
 
-def write_csv(path: Path, table: list[Row], base_wall: float | None, base_ir: int | None) -> None:
+def write_csv(path: Path, table: list[Row], base_wall: float | None) -> None:
     with path.open("w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["attempt", "wall_s", "ir", "speedup", "clears_noise", "record"])
-        w.writerow([0, base_wall, base_ir, "", "", ""])
+        w.writerow(["attempt", "wall_s", "speedup", "clears_noise", "record"])
+        w.writerow([0, base_wall, "", "", ""])
         for r in table:
-            w.writerow([r.number, r.wall_s, r.ir, r.speedup, int(r.clears), int(r.record)])
+            w.writerow([r.number, r.wall_s, r.speedup, int(r.clears), int(r.record)])
 
 
 def _points(rs: list[Row]) -> tuple[list[int], list[float]]:
@@ -272,11 +262,11 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     table = rows(attempts)
-    base_wall, base_ir = baseline(attempts)
-    print(render_table(table, base_wall, base_ir))
+    base_wall = baseline(attempts)
+    print(render_table(table, base_wall))
 
     if args.csv:
-        write_csv(Path(args.csv), table, base_wall, base_ir)
+        write_csv(Path(args.csv), table, base_wall)
         print(f"\ntable: {args.csv}")
     if not args.no_plot:
         out = Path(args.out) if args.out else run / "progress.png"

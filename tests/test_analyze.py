@@ -6,7 +6,6 @@ import pytest
 from autoresearch.types import (
     Attempt,
     AttemptRef,
-    IrCounts,
     Measurement,
     PairTiming,
     Prediction,
@@ -34,7 +33,6 @@ def measurement(
     patched_s: float,
     speedup: float,
     tests_ok: bool = True,
-    ir: IrCounts | None = None,
     pairs: tuple[PairTiming, ...] | None = None,
 ) -> Measurement:
     return Measurement(
@@ -48,7 +46,6 @@ def measurement(
         patched_fp="a",
         speedup=speedup,
         pairs=pairs if pairs is not None else tuple(pair(i, 1.0, patched_s) for i in range(6)),
-        ir=ir,
     )
 
 
@@ -117,15 +114,14 @@ def test_wall_clock_falls_back_to_every_pair_when_none_is_clean() -> None:
 
 
 def test_the_baseline_is_the_unpatched_tree() -> None:
-    ir = IrCounts(base=5_801_995_203, patched=610_518_708)
-    wall, count = analyze.baseline(
-        (attempt(1, measurement(0.07, 19.5, ir=ir)), attempt(2, measurement(0.05, 27.0, ir=ir)))
+    wall = analyze.baseline(
+        (attempt(1, measurement(0.07, 19.5)), attempt(2, measurement(0.05, 27.0)))
     )
-    assert wall == 1.0 and count == 5_801_995_203
+    assert wall == 1.0
 
 
 def test_the_baseline_of_a_run_with_nothing_measured_is_unknown() -> None:
-    assert analyze.baseline((attempt(1, None),)) == (None, None)
+    assert analyze.baseline((attempt(1, None),)) is None
 
 
 def test_the_label_is_cut_at_a_word_and_never_mid_word() -> None:
@@ -142,9 +138,8 @@ def test_the_label_is_the_first_sentence_only() -> None:
 
 
 def test_the_table_carries_the_baseline_row_and_marks_records() -> None:
-    ir = IrCounts(base=5_801_995_203, patched=610_518_708)
-    rows = analyze.rows((attempt(1, measurement(0.07, 19.5, ir=ir)),))
-    text = analyze.render_table(rows, 1.3682, 5_801_995_203)
-    assert "0     1.3682      5,801,995,203  baseline" in text
-    assert "1     0.0700        610,518,708   19.500x *" in text
+    rows = analyze.rows((attempt(1, measurement(0.07, 19.5)),))
+    text = analyze.render_table(rows, 1.3682)
+    assert "0     1.3682    baseline" in text
+    assert "1     0.0700     19.500x *" in text
     assert "1 attempts, 1 marked * set a new best" in text

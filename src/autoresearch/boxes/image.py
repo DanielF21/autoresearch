@@ -25,7 +25,8 @@ WORK_DIR = "/workspace/work"  # the referee's worktrees and logs
 BASE_DIR = "/workspace/base"  # worker only: a read only worktree of the base commit
 HISTORY_DIR = "/workspace/history"  # worker only: every earlier attempt
 
-APT_PACKAGES = ("git", "curl", "build-essential", "valgrind", "time", "util-linux")
+# util-linux is here for taskset, which pins every timing launch to one core.
+APT_PACKAGES = ("git", "curl", "build-essential", "time", "util-linux")
 PIP_PACKAGES = ("numpy", "scipy", "pandas", "pytest", "pytest-xdist")
 
 

@@ -39,9 +39,8 @@ How this works:
   and can be applied with git apply.
 - The referee measures every submission in full and records all of it: the
   module's tests, the whole suite, whether the benchmark result is unchanged,
-  six back to back timings against the original, and instruction counts. A
-  submission that fails tests or is slower is still recorded, so the next
-  worker learns from it.
+  and six back to back timings against the original. A submission that fails
+  tests or is slower is still recorded, so the next worker learns from it.
 - A real speedup is one that passes both suites, computes the same result, and
   whose measured speedup reaches the noise floor given below.
 - Only source files may change. A patch that edits tests or benchmarks is
@@ -51,6 +50,10 @@ How this works:
   different.
 - Work in small steps: look, change, run the module tests, run the benchmark,
   and submit when you have something. An attempt that never submits is wasted.
+- run_tests runs the hot module's own tests, which is the check worth making
+  while you work. You cannot run the whole suite and do not need to: the referee
+  runs it on every submission, and a submission that breaks it is recorded as
+  failing tests. Spend the time on the patch instead.
 - When you submit, the harness takes git diff of your working tree as the
   patch. Nothing else you write counts.
 """
@@ -84,11 +87,10 @@ def outcome(a: Attempt) -> str:
 def index_line(a: Attempt) -> str:
     m = a.measurement
     speed = "--" if m is None or m.speedup is None else f"{m.speedup:.2f}x"
-    ir = "--" if m is None or m.ir is None else f"{m.ir.delta_pct:+.1f}%"
     note = outcome(a)
     if a.duplicate_of:
         note += f", same diff as {a.duplicate_of}"
-    return f"{a.ref.dirname:<4}  {speed:>8}  {ir:>8}  {note}"
+    return f"{a.ref.dirname:<4}  {speed:>8}  {note}"
 
 
 def render_history(history: tuple[Attempt, ...]) -> str:
@@ -112,7 +114,7 @@ def render_history(history: tuple[Attempt, ...]) -> str:
         "measurement.json and rationale.md. Read the ones worth reading before you "
         "repeat an idea or build on one.\n\n"
         "```\n"
-        f"{'id':<4}  {'speedup':>8}  {'ir':>8}  outcome\n"
+        f"{'id':<4}  {'speedup':>8}  outcome\n"
     )
     return head + "\n".join(index_line(a) for a in history) + "\n```\n"
 

@@ -9,7 +9,6 @@ from autoresearch.config import load_config
 from autoresearch.types import (
     Attempt,
     AttemptRef,
-    IrCounts,
     Measurement,
     PairTiming,
     Prediction,
@@ -114,14 +113,15 @@ def test_everything_the_referee_record_does_not_explain_lands_in_one_named_block
     m = Measurement(**{**m.__dict__, "wall_s": 5000.0})
     p = profile_run.referee_profile(1, m, cfg)
     assert sum(p.parts.values()) == 5000.0
-    assert p.parts["instruction counts, setup, cleanup"] > 4000
+    assert p.parts["setup and cleanup"] > 4000
 
 
-def test_a_missing_instruction_count_is_flagged() -> None:
+def test_a_referee_that_recorded_an_error_is_flagged() -> None:
     cfg = load_config(ROOT / "configs" / "t1_w4.toml")
-    with_ir = measurement(0.1, 10.0, ir=IrCounts(base=10, patched=5))
-    assert profile_run.referee_profile(1, with_ir, cfg).ir_timed_out is False
-    assert profile_run.referee_profile(1, measurement(0.1, 10.0), cfg).ir_timed_out is True
+    clean = measurement(0.1, 10.0)
+    assert profile_run.referee_profile(1, clean, cfg).errors == 0
+    broke = Measurement(**{**clean.__dict__, "errors": ("timing: guest died", "cleanup")})
+    assert profile_run.referee_profile(1, broke, cfg).errors == 2
 
 
 def test_the_barrier_cost_is_the_wait_for_the_slowest() -> None:

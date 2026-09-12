@@ -53,7 +53,6 @@ def test_real_speedup_is_measured_in_full(config: RunConfig) -> None:
     assert m.speedup == pytest.approx(1.05)
     assert m.noise_floor == 1.0106
     assert m.clears_noise
-    assert m.ir is not None and m.ir.base == 1000 and m.ir.patched == 800
     assert m.errors == ()
     assert m.provenance.box_id == "sb_fake"
     assert ref.broken == ""
@@ -63,7 +62,6 @@ def test_within_noise_is_recorded_and_not_a_real_speedup(config: RunConfig) -> N
     m = _referee(make_box(speedup=1.005), config).measure((PATCHES / "whitespace.diff").read_text())
     assert m.tests_pass and m.speedup == pytest.approx(1.005)
     assert not m.clears_noise
-    assert m.ir is not None
 
 
 def test_slowdown_is_measured_with_ratio_below_one(config: RunConfig) -> None:
@@ -87,7 +85,7 @@ def test_patch_that_does_not_apply_records_that_and_nothing_else(config: RunConf
     box = make_box(apply_ok=False)
     m = _referee(box, config).measure(PRECOMPUTE)
     assert not m.applied and "does not apply" in m.apply_error
-    assert m.tests == () and m.pairs == () and m.ir is None
+    assert m.tests == () and m.pairs == ()
     assert not any("run_tests.py" in c or "--repeats" in c for c in box.commands)
 
 
@@ -101,7 +99,6 @@ def test_test_failures_are_recorded_and_timing_still_runs(config: RunConfig) -> 
     m = _referee(box, config).measure(PRECOMPUTE)
     assert [t.ok for t in m.tests] == [False, False] and not m.tests_pass
     assert m.speedup == pytest.approx(1.2)
-    assert m.ir is not None
     assert not m.clears_noise
     assert any("--scope full" in c for c in box.commands)
 
@@ -113,12 +110,12 @@ def test_different_result_is_recorded_and_timing_still_runs(config: RunConfig) -
     assert not m.clears_noise
 
 
-def test_patched_tree_that_cannot_run_skips_timing_and_counts(config: RunConfig) -> None:
+def test_patched_tree_that_cannot_run_skips_timing(config: RunConfig) -> None:
     box = make_box(patched_verify_fails=True)
     m = _referee(box, config).measure(PRECOMPUTE)
     assert m.tests_pass  # the tests ran before the verify step
     assert m.base_fp == "fp_same" and m.patched_fp == ""
-    assert m.pairs == () and m.speedup is None and m.ir is None
+    assert m.pairs == () and m.speedup is None
     assert any("verify patched" in e for e in m.errors)
     assert any("skipped" in e for e in m.errors)
     assert not any("--repeats" in c for c in box.commands)
@@ -132,13 +129,6 @@ def test_contaminated_pairs_retry_once_then_record_an_error(config: RunConfig) -
     launches = [c for c in box.commands if "time_target.py" in c and "--repeats" in c]
     assert len(launches) == 2 * 6 * 2  # two passes of six pairs, two launches each
     assert all(p.contaminated for p in m.pairs) and m.pairs[0].reasons == ("steal",)
-    assert m.ir is not None  # instruction counts still ran
-
-
-def test_ir_failure_is_an_error_not_a_lost_measurement(config: RunConfig) -> None:
-    m = _referee(make_box(speedup=1.05, ir_ok=False), config).measure(PRECOMPUTE)
-    assert m.ir is None and any("instruction counts" in e for e in m.errors)
-    assert m.clears_noise
 
 
 def test_timing_launches_are_pinned_seeded_and_alternate(config: RunConfig) -> None:

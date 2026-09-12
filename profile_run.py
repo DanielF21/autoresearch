@@ -21,15 +21,15 @@ is:
   modelled   a timing launch costs one fixed startup plus ``repeats_per_launch``
              bodies. Fixed is 0.3 s, measurement D, long bench, plain config.
              The same shape covers the two verify launches and the canary.
-  derived    instruction counting, plus worktree setup and cleanup, is whatever
-             is left. The check on that is the six attempts whose counts timed
-             out: the derived block lands at base counting plus exactly the
-             1800 s IR_TIMEOUT, and for the two that timed out on the second
-             call, plus a first call as well.
+  derived    worktree setup, cleanup and guest overhead is whatever is left.
 
-So the derived block is named "instruction counts, setup, cleanup" and is not
-claimed to be instruction counting alone. Everything labelled measured is read
-straight from the run directory.
+The derived block is named "setup and cleanup" and is a residual, not a claim
+about any one step. Everything labelled measured is read straight from the run
+directory.
+
+A run recorded before instruction counting was retired carries that cost inside
+the referee wall clock, so its residual is large and its error list says why.
+See artifacts/instruction_counting.md.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ REFEREE_ORDER = [
     "canary",
     "timing base",
     "timing patched",
-    "instruction counts, setup, cleanup",
+    "setup and cleanup",
 ]
 COLOURS = {
     "box create": "#8fb8de",
@@ -73,7 +73,7 @@ COLOURS = {
     "canary": "#d9d36a",
     "timing base": "#e2725b",
     "timing patched": "#f2a58d",
-    "instruction counts, setup, cleanup": "#7b5ea7",
+    "setup and cleanup": "#7b5ea7",
 }
 
 
@@ -98,7 +98,7 @@ class RefereeProfile:
     wall_s: float
     parts: dict[str, float] = field(default_factory=dict)
     launches: int = 0
-    ir_timed_out: bool = False
+    errors: int = 0
 
 
 def worker_profile(attempt: Attempt, transcript: str) -> WorkerProfile:
@@ -174,9 +174,9 @@ def referee_profile(number: int, m: Measurement, config: RunConfig) -> RefereePr
     p.parts["canary"] = canary
     p.parts["timing base"] = base_timing
     p.parts["timing patched"] = patched_timing
-    p.parts["instruction counts, setup, cleanup"] = max(0.0, m.wall_s - sum(p.parts.values()))
-    p.launches = 2 * len(m.pairs) + 2 + 1 + 4  # timing, verify, canary, cachegrind
-    p.ir_timed_out = m.ir is None
+    p.parts["setup and cleanup"] = max(0.0, m.wall_s - sum(p.parts.values()))
+    p.launches = 2 * len(m.pairs) + 2 + 1  # timing, verify, canary
+    p.errors = len(m.errors)
     return p
 
 
@@ -298,7 +298,7 @@ def render(
     out.append(f"{'att':>4} {'wall':>7} " + " ".join(f"{k[:12]:>13}" for k in REFEREE_ORDER))
     for ref in referees:
         cells = " ".join(f"{ref.parts.get(k, 0.0):>13.1f}" for k in REFEREE_ORDER)
-        flag = " IR TIMEOUT" if ref.ir_timed_out else ""
+        flag = f"  {ref.errors} error(s)" if ref.errors else ""
         out.append(f"{ref.number:>4} {ref.wall_s:>7.0f} {cells}{flag}")
     rtot = {k: sum(ref.parts.get(k, 0.0) for ref in referees) for k in REFEREE_ORDER}
     out.append(
@@ -386,7 +386,7 @@ def plot(
     )
     ax.set_xlim(0, t)
 
-    # B. referee per attempt, full scale, so the counting block is not hidden
+    # B. referee per attempt, full scale, so a runaway block is not hidden
     ax = fig.add_subplot(gs[1, :])
     xs = [ref.number for ref in referees]
     bottom = [0.0] * len(referees)
@@ -395,11 +395,11 @@ def plot(
         ax.bar(xs, vals, bottom=bottom, color=COLOURS[k], label=k, width=0.72, edgecolor="white")
         bottom = [b + v for b, v in zip(bottom, vals, strict=True)]
     for ref in referees:
-        if ref.ir_timed_out:
+        if ref.errors:
             ax.text(
                 ref.number,
                 ref.wall_s + 40,
-                "IR\ntimeout",
+                f"{ref.errors}\nerror" + ("s" if ref.errors > 1 else ""),
                 ha="center",
                 fontsize=7,
                 color="#7b5ea7",
@@ -411,7 +411,7 @@ def plot(
     ax.legend(fontsize=8, ncol=4, loc="upper left")
     ax.grid(axis="y", alpha=0.25, lw=0.5)
 
-    # C. the same bars with the counting block cut away, so the rest is legible
+    # C. the same bars with the residual cut away, so the measured steps are legible
     ax = fig.add_subplot(gs[2, 0])
     bottom = [0.0] * len(referees)
     for k in REFEREE_ORDER[:-1]:
@@ -421,7 +421,7 @@ def plot(
     ax.set_xticks(xs)
     ax.set_xlabel("attempt")
     ax.set_ylabel("seconds")
-    ax.set_title("C. Referee without the counting block: what the rest costs", loc="left")
+    ax.set_title("C. Referee without the residual: what the measured steps cost", loc="left")
     ax.legend(fontsize=8, loc="upper right")
     ax.grid(axis="y", alpha=0.25, lw=0.5)
 

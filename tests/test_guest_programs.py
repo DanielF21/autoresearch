@@ -1,7 +1,6 @@
 """Runs the guest programs as real subprocesses against small local stand ins.
 
-time_target and apply_patch are exercised end to end. count_ir needs valgrind,
-which is not on the laptop, so only its parser and command shape are tested.
+time_target, run_tests and apply_patch are exercised end to end.
 """
 
 import json
@@ -12,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from autoresearch.guest import count_ir, run_tests
+from autoresearch.guest import run_tests
 
 GUEST = Path(__file__).parent.parent / "src" / "autoresearch" / "guest"
 
@@ -93,26 +92,6 @@ def test_time_target_verify_mode_sees_the_hot_file(fake_tree: Path) -> None:
     assert 0.0 < float(str(out["hot_tottime_share"])) <= 1.0
 
 
-def test_time_target_calls_mode(fake_tree: Path) -> None:
-    out = _run(
-        "time_target.py",
-        "--root",
-        str(fake_tree),
-        "--package",
-        "fakenx",
-        "--graph",
-        "nx.make(5)",
-        "--call",
-        "nx.compute(G)",
-        "--hot",
-        "fakenx/hot.py",
-        "--calls",
-        "2",
-    )
-    assert out["kind"] == "calls"
-    assert out["calls"] == 2
-
-
 def test_time_target_refuses_a_package_outside_the_tree(fake_tree: Path, tmp_path: Path) -> None:
     """Point --root at an empty directory while the package is importable via PYTHONPATH."""
     empty = tmp_path / "empty"
@@ -185,22 +164,6 @@ def test_run_tests_end_to_end(tmp_path: Path) -> None:
 )
 def test_run_tests_summary_parser(line: str, expected: dict[str, int]) -> None:
     assert run_tests.parse_summary("junk\n" + line + "\n") == expected
-
-
-def test_count_ir_parser_reads_cachegrind_summary() -> None:
-    stderr = "==123== \n==123== I refs:        1,792,439,524\n==123== \n"
-    assert count_ir.parse_ir(stderr) == 1_792_439_524
-    assert count_ir.parse_ir("nothing") is None
-
-
-def test_count_ir_command_disables_aslr_and_cache_sim() -> None:
-    argv = count_ir.command(
-        "python3", Path("/g/time_target.py"), "/w/a", "nx.g()", "nx.c(G)", 2, "h.py"
-    )
-    assert argv[0] == "setarch" and argv[2] == "-R"
-    assert "--tool=cachegrind" in argv and "--cache-sim=no" in argv
-    assert argv[argv.index("--calls") + 1] == "2"
-    assert "--no-counters" in argv
 
 
 def _git(repo: Path, *args: str) -> str:

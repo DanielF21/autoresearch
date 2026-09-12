@@ -160,6 +160,8 @@ Both effects are same signed in all 3 cycles. The anchor and the independent can
 
 +5.77% on the anchor, +8.55% on the canary, consistent across cycles. **The referee gets a dedicated box**, and the cachegrind fan out gets its own. At roughly $2 per box this was always the likely answer, and it is now evidenced.
 
+> Update 2026-09-12: the dedicated referee box shipped. The cachegrind fan out never did, and instruction counting was removed entirely rather than moved. See `artifacts/instruction_counting.md`.
+
 ### 2. Cross box interference is real but small, and probably cancels
 
 +1.65% anchor, +2.51% canary, same sign in 3 of 3 cycles. Boxes are not fully isolated.
@@ -270,3 +272,5 @@ Scope changed by user decision: every candidate gets both an instruction count a
 ### Consequence
 
 Counting runs on separate boxes in parallel with the referee, because counts are unaffected by contention and drift. It adds no referee queue time. cg_sim costs 2.5x cg_nosim and shows almost no LL signal on this target. Option for the user: count on every candidate, simulate cache only when the Ir delta and wall delta disagree.
+
+> **Not what was built, and now retired.** The referee counted synchronously on its own box, which check 3 measured at 62.8% of all box seconds. Rather than move counting onto its own fan out, it was removed: the Ir delta and the wall delta disagreed by about 2.1x on every bitset patch, and cachegrind cost roughly 50,000x on the vectorized ones. Full working in `artifacts/instruction_counting.md`.

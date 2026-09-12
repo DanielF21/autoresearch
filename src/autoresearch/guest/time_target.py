@@ -16,9 +16,6 @@ Modes:
 - ``--verify``: profile one call and report whether the hot file executed and
   what share of self time it took. Also warms the ``.pyc`` so no later launch
   pays compilation.
-- ``--calls N``: call the target N times with no timing and no counters. Used
-  under cachegrind, where N = 1 and N = 2 isolate the per call instruction
-  count from the fixed startup cost.
 """
 
 from __future__ import annotations
@@ -70,7 +67,6 @@ def main() -> int:
     ap.add_argument("--repeats", type=int, default=7)
     ap.add_argument("--label", default="")
     ap.add_argument("--verify", action="store_true")
-    ap.add_argument("--calls", type=int, default=0)
     ap.add_argument("--no-counters", action="store_true")
     args = ap.parse_args()
 
@@ -103,14 +99,6 @@ def main() -> int:
         "hash_seed": os.environ.get("PYTHONHASHSEED", "<unset>"),
     }
     scope = {"nx": nx, "G": graph}
-
-    if args.calls:
-        result = None
-        for _ in range(args.calls):
-            result = eval(args.call, scope)
-        base.update(kind="calls", calls=args.calls, result_fp=fingerprint(result))
-        print(json.dumps(base))
-        return 0
 
     if args.verify:
         import cProfile

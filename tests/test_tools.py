@@ -37,12 +37,15 @@ def test_the_shell_description_tells_the_agent_where_it_is() -> None:
     assert REPO_DIR in description and "12000" in description
 
 
-def test_run_tests_module_and_full_scopes() -> None:
+def test_run_tests_runs_the_module_suite_and_takes_no_arguments() -> None:
+    """The full suite is the referee's. A worker running it too spends its own
+    budget to learn what the referee establishes on every submission anyway."""
     seen: list[str] = []
+    failing = {"ok": False}
 
     def handler(cmd: str) -> object:
         seen.append(cmd)
-        good = "--scope module" in cmd
+        good = not failing["ok"]
         rec = {
             "ok": good,
             "passed": 5,
@@ -54,13 +57,25 @@ def test_run_tests_module_and_full_scopes() -> None:
         return ok(json.dumps(rec))
 
     box = FakeBox().on("run_tests.py", handler)  # type: ignore[arg-type]
-    r = execute(ctx(box), "run_tests", {"scope": "module"})
+    r = execute(ctx(box), "run_tests", {})
     assert r.text.startswith("module tests: PASSED: 5 passed")
     assert "--target " + TARGET.test_file in seen[-1] and "--workers 1" in seen[-1]
-    r = execute(ctx(box), "run_tests", {"scope": "full"})
-    assert r.text.startswith("full tests: FAILED") and "FAILED test_x" in r.text
-    assert "--target networkx " in seen[-1] and "--workers 4" in seen[-1]
-    assert "error" in execute(ctx(box), "run_tests", {"scope": "nope"}).text
+    assert "--scope module" in seen[-1]
+
+    # The whole package is never the target, whatever the model passes.
+    execute(ctx(box), "run_tests", {"scope": "full"})
+    assert "--target networkx " not in seen[-1] and "--workers 4" not in seen[-1]
+    assert "--target " + TARGET.test_file in seen[-1]
+
+    failing["ok"] = True
+    r = execute(ctx(box), "run_tests", {})
+    assert r.text.startswith("module tests: FAILED") and "FAILED test_x" in r.text
+
+
+def test_run_tests_offers_the_model_no_parameters() -> None:
+    spec = next(s for s in TOOL_SPECS if s["function"]["name"] == "run_tests")
+    assert spec["function"]["parameters"]["properties"] == {}
+    assert "referee" in spec["function"]["description"]
 
 
 def test_run_benchmark_alternates_order_and_reports_ratio() -> None:

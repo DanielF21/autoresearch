@@ -3,9 +3,8 @@
 Three stateless parts and one writer.
 
 - A worker proposes one patch per attempt from inside its own sailbox.
-- A referee measures one patch on its own sailbox against the base commit: tests,
-  timing, instruction count. Every measurement is recorded; nothing is accepted or
-  rejected.
+- A referee measures one patch on its own sailbox against the base commit: tests and
+  paired timing. Every measurement is recorded; nothing is accepted or rejected.
 - An orchestrator runs rounds, calls workers and referees, and is the only thing that
   writes to the run directory.
 

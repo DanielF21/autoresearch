@@ -48,7 +48,6 @@ def referee_box(
     fp_match: bool = True,
     patched_verify_fails: bool = False,
     contaminate_pairs: bool = False,
-    ir_ok: bool = True,
     cleanup_ok: bool = True,
 ) -> FakeBox:
     """A referee box whose patched tree runs ``speedup`` times faster than the base.
@@ -76,7 +75,9 @@ def referee_box(
 
     def run_tests(cmd: str) -> CommandResult:
         scope = arg(cmd, "--scope")
-        good = module_ok if scope == "module" else full_ok
+        # An explicit lookup, not an else: an unexpected label should fail the
+        # test rather than quietly resolve to the full suite's answer.
+        good = {"module": module_ok, "full": full_ok}[scope]
         return ok(
             json.dumps(
                 {
@@ -117,16 +118,6 @@ def referee_box(
 
     box.on("time_target.py", time_target)
     box.on("canary.py", ok(json.dumps({"kind": "canary", "min_s": 0.5})))
-
-    def count_ir(cmd: str) -> CommandResult:
-        if not ir_ok:
-            return ok(json.dumps({"kind": "ir", "ir": None, "error": "valgrind missing"}))
-        root = arg(cmd, "--root")
-        calls = int(arg(cmd, "--calls"))
-        body = 800 if root == PATCHED_TREE else 1000
-        return ok(json.dumps({"kind": "ir", "ir": 5000 + calls * body, "error": ""}))
-
-    box.on("count_ir.py", count_ir)
     return box
 
 

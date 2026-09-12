@@ -59,7 +59,7 @@ def submit_script() -> list[Scripted]:
     return [
         tool_call("shell", {"cmd": "cat -n networkx/algorithms/cluster.py"}),
         tool_call("shell", {"cmd": "sed -i s/a/b/ networkx/algorithms/cluster.py"}),
-        tool_call("run_tests", {"scope": "module"}),
+        tool_call("run_tests", {}),
         tool_call("submit", {"predicted_speedup": 1.3, "rationale": "precompute neighbour sets"}),
     ]
 

@@ -92,13 +92,12 @@ def cmd_measure(args: argparse.Namespace) -> int:
             print(f"measuring {patch_path} ...", flush=True)
             m = ref.measure(patch)
             report.append({"patch": patch_path, "measurement": m.to_dict()})
-            ir = "none" if m.ir is None else f"{m.ir.delta_pct:+.2f} pct"
             tests = (
                 ", ".join(f"{t.scope} {'pass' if t.ok else 'FAIL'}" for t in m.tests) or "not run"
             )
             print(
                 f"  applied {m.applied}; tests {tests}; result matches {m.result_matches}; "
-                f"median {m.speedup}; clears noise {m.clears_noise}; ir {ir}; "
+                f"median {m.speedup}; clears noise {m.clears_noise}; "
                 f"errors {list(m.errors)}; {m.wall_s:.0f}s",
                 flush=True,
             )
