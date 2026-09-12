@@ -2,8 +2,12 @@
 
 Counts are of facts, not decisions: how many attempts were measured, how many
 passed the tests, how many cleared the noise floor. Best so far is the highest
-median ratio among attempts that cleared it; the best raw ratio over every
-timed attempt is shown beside it so the two cannot be confused.
+speedup among attempts that cleared it; the best raw ratio over every timed
+attempt is shown beside it so the two cannot be confused.
+
+The one number here that is not a fact is the dollar cost, which depends on a
+cached input rate Sail does not publish. It is reported as a bracket for that
+reason. Every token count it is derived from is exact.
 """
 
 from __future__ import annotations
@@ -37,7 +41,8 @@ class RunStatus:
     usage: Usage
     prompt_tokens_per_attempt: float | None
     cached_share: float | None
-    cost_usd: float | None
+    cost_low_usd: float | None
+    cost_high_usd: float | None
     harness_errors: tuple[str, ...]
 
     def render(self) -> str:
@@ -70,8 +75,13 @@ class RunStatus:
                 f"({100 * (self.cached_share or 0):.0f} percent cached), "
                 f"{self.usage.completion_tokens / max(1, self.attempts):,.0f} completion"
             )
-        if self.cost_usd is not None:
-            lines.append(f"inference cost so far at list price: ${self.cost_usd:.2f}")
+        if self.cost_low_usd is not None and self.cost_high_usd is not None:
+            lines.append(
+                f"inference cost so far at list price: ${self.cost_low_usd:.2f} to "
+                f"${self.cost_high_usd:.2f} (the cached input rate is not published; "
+                "the low end reads cached tokens as free, the high end at the full "
+                "input price)"
+            )
         if self.harness_errors:
             lines.append(f"harness errors ({len(self.harness_errors)}):")
             lines += [f"  {e}" for e in self.harness_errors]
@@ -80,7 +90,12 @@ class RunStatus:
         return "\n".join(lines)
 
 
-# List prices from the SDK's catalog on 2026-09-11, per million tokens, asap window.
+# List prices from the SDK's catalog on 2026-09-11, per million tokens, asap window:
+# (input, output). There is no cached input rate here because Sail does not publish
+# one: it is absent from the SDK, the CLI and the inference response. Over 97 percent
+# of our prompt tokens are cache hits, so assuming they cost full price overstates the
+# bill by roughly six times. Until the rate is read off the billing page, the status
+# line reports a bracket rather than one confident wrong number.
 PRICES_PER_M: dict[str, tuple[float, float]] = {
     "deepseek/deepseek-v4-pro-0813": (1.32, 3.96),
     "deepseek/deepseek-v4-flash-0731": (0.09, 0.18),
@@ -103,9 +118,12 @@ def compute_status(
         usage = usage + a.usage
     n = len(attempts)
     prices = PRICES_PER_M.get(model)
-    cost = None
+    low = high = None
     if prices and n:
-        cost = (usage.prompt_tokens * prices[0] + usage.completion_tokens * prices[1]) / 1e6
+        completion = usage.completion_tokens * prices[1]
+        fresh = max(0, usage.prompt_tokens - usage.cached_tokens)
+        low = (fresh * prices[0] + completion) / 1e6
+        high = (usage.prompt_tokens * prices[0] + completion) / 1e6
     errors = tuple(e for r in rounds for e in r.errors)
     return RunStatus(
         run_id=run_id,
@@ -133,6 +151,7 @@ def compute_status(
         usage=usage,
         prompt_tokens_per_attempt=usage.prompt_tokens / n if n else None,
         cached_share=(usage.cached_tokens / usage.prompt_tokens) if usage.prompt_tokens else None,
-        cost_usd=cost,
+        cost_low_usd=low,
+        cost_high_usd=high,
         harness_errors=errors,
     )

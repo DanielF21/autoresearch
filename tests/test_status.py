@@ -84,7 +84,12 @@ def test_status_totals(tmp_path: Path) -> None:
     assert st.worker_wall_median_s == 103.5 and st.referee_wall_median_s == 200.0
     assert st.usage == Usage(6000, 3600, 600, 240)
     assert st.prompt_tokens_per_attempt == 1000 and st.cached_share == 0.6
-    assert st.cost_usd is not None and abs(st.cost_usd - (6000 * 1.32 + 600 * 3.96) / 1e6) < 1e-9
+    # A bracket, not a number. 3600 of the 6000 prompt tokens were cache hits and
+    # Sail does not publish what a hit costs, so the low end reads them as free and
+    # the high end at the full input price.
+    assert st.cost_low_usd is not None and st.cost_high_usd is not None
+    assert abs(st.cost_low_usd - (2400 * 1.32 + 600 * 3.96) / 1e6) < 1e-9
+    assert abs(st.cost_high_usd - (6000 * 1.32 + 600 * 3.96) / 1e6) < 1e-9
     assert st.harness_errors == ("boom",)
     text = st.render()
     assert "6 of 32 rounds" in text
@@ -92,10 +97,12 @@ def test_status_totals(tmp_path: Path) -> None:
     assert "best real speedup so far 1.0500 (attempt 0001)" in text
     assert "best raw ratio over all timed attempts 1.3000" in text
     assert "boom" in text
+    assert "inference cost so far at list price: $" in text
+    assert "cached input rate is not published" in text
 
 
 def test_status_of_an_empty_run(tmp_path: Path) -> None:
     st = compute_status(history.RunPaths(tmp_path), 32, "unknown-model", "x")
-    assert st.attempts == 0 and st.best_ratio is None and st.cost_usd is None
+    assert st.attempts == 0 and st.best_ratio is None and st.cost_low_usd is None
     text = st.render()
     assert "best real speedup so far: none" in text and "harness errors: none" in text
