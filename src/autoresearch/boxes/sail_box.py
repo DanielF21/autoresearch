@@ -49,6 +49,12 @@ class SailBox:
             timed_out=bool(r.timed_out),
         )
 
+    def start(self, command: str, *, env: Mapping[str, str] | None = None) -> None:
+        try:
+            self._sb.exec(command, background=True, env=dict(env) if env else None).wait()
+        except Exception as e:
+            raise BoxError(f"start failed on {self.name}: {e!r}") from e
+
     def write(self, path: str, data: bytes) -> None:
         try:
             self._sb.fs.write(path, data)
@@ -66,6 +72,12 @@ class SailBox:
             self._sb.fs.upload_dir(str(local), remote)
         except Exception as e:
             raise BoxError(f"upload {local} failed on {self.name}: {e!r}") from e
+
+    def download_dir(self, remote: str, local: Path) -> None:
+        try:
+            self._sb.fs.download_dir(remote, str(local))
+        except Exception as e:
+            raise BoxError(f"download {remote} failed on {self.name}: {e!r}") from e
 
     def terminate(self) -> None:
         # Never swallowed: a box that fails to terminate bills until autosleep,
@@ -99,6 +111,24 @@ class SailBoxFactory:
             )
         except Exception as e:
             raise BoxError(f"create {name} ({role}, size {size}) failed: {e!r}") from e
+        return SailBox(sb)
+
+    def create_control(self, *, name: str, volume: str, mount: str) -> Box:
+        """The control box: never sleeps, with the run volume mounted at ``mount``."""
+        try:
+            vol = self._sail.Volume.find(volume, mint_if_missing=True)
+            sb = self._sail.Sailbox.create(
+                app=self._app,
+                name=name,
+                image=self._image,
+                size=self._config.boxes.control_size,
+                disk_limit_gib=self._config.boxes.disk_gib,
+                volumes={mount: vol},
+                auto_sleep=self._sail.AutoSleep.never(),
+                timeout=1800,
+            )
+        except Exception as e:
+            raise BoxError(f"create control box {name} failed: {e!r}") from e
         return SailBox(sb)
 
     def reattach(self, box_id: str) -> Box | None:

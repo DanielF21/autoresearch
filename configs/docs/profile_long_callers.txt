@@ -1,0 +1,22 @@
+   Ordered by: internal time
+
+Function                                                                                                    was called by...
+                                                                                                                ncalls  tottime  cumtime
+networkx/algorithms/cluster.py:160(_directed_triangles_and_degree_iter)                     <-    1001    1.382    1.689  networkx/algorithms/cluster.py:384(clustering)
+networkx/algorithms/cluster.py:180(<genexpr>)                                               <- 1083208    0.174    0.174  {built-in method builtins.sum}
+{built-in method builtins.sum}                                                                              <-   99508    0.132    0.306  networkx/algorithms/cluster.py:160(_directed_triangles_and_degree_iter)
+networkx/algorithms/cluster.py:384(clustering)                                              <-       1    0.001    1.690  networkx/utils/backends.py:541(_call_if_no_backends_installed)
+{built-in method builtins.len}                                                                              <-    3000    0.000    0.000  networkx/algorithms/cluster.py:160(_directed_triangles_and_degree_iter)
+networkx/algorithms/cluster.py:170(<genexpr>)                                               <-    1001    0.000    0.000  networkx/algorithms/cluster.py:160(_directed_triangles_and_degree_iter)
+networkx/classes/graph.py:2012(nbunch_iter)                                                 <-       1    0.000    0.000  networkx/algorithms/cluster.py:160(_directed_triangles_and_degree_iter)
+{method 'disable' of '_lsprof.Profiler' objects}                                                            <- 
+<class 'networkx.utils.decorators.argmap'> compilation 21:1(argmap_clustering_18)                           <- 
+networkx/utils/backends.py:541(_call_if_no_backends_installed)                              <-       1    0.000    1.690  <class 'networkx.utils.decorators.argmap'> compilation 21:1(argmap_clustering_18)
+networkx/classes/digraph.py:1260(is_directed)                                               <-       1    0.000    0.000  networkx/algorithms/cluster.py:384(clustering)
+{built-in method builtins.iter}                                                                             <-       1    0.000    0.000  networkx/classes/graph.py:2012(nbunch_iter)
+<class 'networkx.utils.decorators.argmap'> compilation 25:1(argmap__directed_triangles_and_degree_iter_22)  <-       1    0.000    0.000  networkx/algorithms/cluster.py:384(clustering)
+networkx/utils/decorators.py:83(_not_implemented_for)                                       <-       1    0.000    0.000  <class 'networkx.utils.decorators.argmap'> compilation 25:1(argmap__directed_triangles_and_degree_iter_22)
+networkx/classes/graph.py:472(__contains__)                                                 <-       1    0.000    0.000  networkx/algorithms/cluster.py:384(clustering)
+networkx/classes/digraph.py:1256(is_multigraph)                                             <-       1    0.000    0.000  networkx/utils/decorators.py:83(_not_implemented_for)
+
+

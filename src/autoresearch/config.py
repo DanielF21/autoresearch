@@ -33,6 +33,7 @@ class TargetSpec:
     call: str
     allow: tuple[str, ...]
     deny: tuple[str, ...]
+    docs: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -45,6 +46,7 @@ class TargetSpec:
             "call": self.call,
             "allow": list(self.allow),
             "deny": list(self.deny),
+            "docs": list(self.docs),
         }
 
 
@@ -191,6 +193,7 @@ def parse_config(text: str) -> RunConfig:
             call=_str(target, "target", "call"),
             allow=_str_list(target, "target", "allow"),
             deny=_str_list(target, "target", "deny"),
+            docs=_str_list(target, "target", "docs") if "docs" in target else (),
         ),
         worker=WorkerConfig(
             model=_str(worker, "worker", "model"),

@@ -16,6 +16,9 @@ graph = "nx.erdos_renyi_graph(1000, 0.05, seed=42, directed=True)"
 call = "nx.clustering(G)"
 allow = ["networkx/**"]
 deny = ["networkx/**/tests/**", "benchmarks/**"]
+# Shown to every worker. The profile only; artifacts/repo.md is left out because
+# it names a candidate patch, which would hand the agents their first move.
+docs = ["configs/docs/profile_long_flat.txt", "configs/docs/profile_long_callers.txt"]
 
 [worker]
 model = "deepseek/deepseek-v4-pro-0813"

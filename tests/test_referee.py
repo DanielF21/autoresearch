@@ -1,13 +1,11 @@
 """The referee against a scripted FakeBox that answers each guest program."""
 
-import json
-import re
 from pathlib import Path
 
 import pytest
 
 from autoresearch.boxes.fake_box import FakeBox, ok
-from autoresearch.boxes.protocol import BoxError, CommandResult
+from autoresearch.boxes.protocol import BoxError
 from autoresearch.config import RunConfig, load_config
 from autoresearch.referee.referee import (
     INCUMBENT_TREE,
@@ -16,6 +14,7 @@ from autoresearch.referee.referee import (
     guest_command,
 )
 from autoresearch.types import Verdict
+from tests.helpers import referee_box as make_box
 
 ROOT = Path(__file__).parent.parent
 PATCHES = ROOT / "tests" / "fixtures" / "patches"
@@ -24,90 +23,6 @@ PATCHES = ROOT / "tests" / "fixtures" / "patches"
 @pytest.fixture
 def config() -> RunConfig:
     return load_config(ROOT / "configs" / "t1_w1.toml")
-
-
-def _arg(command: str, flag: str) -> str:
-    """Value of ``--flag value`` in a shell quoted command."""
-    m = re.search(rf"{flag} (?:'([^']*)'|(\S+))", command)
-    assert m, f"{flag} not in {command}"
-    return m.group(1) if m.group(1) is not None else m.group(2)
-
-
-def make_box(
-    *,
-    speedup: float = 1.05,
-    apply_ok: bool = True,
-    module_ok: bool = True,
-    full_ok: bool = True,
-    fp_match: bool = True,
-    contaminate_pairs: bool = False,
-    ir_ok: bool = True,
-    cleanup_ok: bool = True,
-) -> FakeBox:
-    """A box whose patched tree runs ``speedup`` times faster than its incumbent."""
-    box = FakeBox()
-
-    box.on("git rev-parse HEAD", ok("boxhead\n"))
-
-    def apply_patch(cmd: str) -> CommandResult:
-        if "--remove" in cmd:
-            return ok(json.dumps({"kind": "worktree_removed", "ok": cleanup_ok, "error": ""}))
-        if "--patch" in cmd and not apply_ok:
-            return ok(
-                json.dumps({"kind": "worktree", "ok": False, "error": "patch does not apply"})
-            )
-        return ok(
-            json.dumps({"kind": "worktree", "ok": True, "applied": "--patch" in cmd, "error": ""})
-        )
-
-    box.on("apply_patch.py", apply_patch)
-
-    def run_tests(cmd: str) -> CommandResult:
-        scope = _arg(cmd, "--scope")
-        good = module_ok if scope == "module" else full_ok
-        return ok(
-            json.dumps(
-                {
-                    "kind": "tests",
-                    "scope": scope,
-                    "ok": good,
-                    "passed": 10 if good else 9,
-                    "failed": 0 if good else 1,
-                    "errors": 0,
-                    "duration_s": 1.5,
-                }
-            )
-        )
-
-    box.on("run_tests.py", run_tests)
-
-    def time_target(cmd: str) -> CommandResult:
-        root = _arg(cmd, "--root")
-        patched = root == PATCHED_TREE
-        if "--verify" in cmd:
-            fp = "fp_same" if (fp_match or not patched) else "fp_other"
-            return ok(json.dumps({"kind": "verify", "hot_executed": True, "result_fp": fp}))
-        t = 1.0 / speedup if patched else 1.0
-        if contaminate_pairs:
-            samples = [{"t": t, "contaminated": True, "reasons": ["steal"]}]
-            return ok(
-                json.dumps({"kind": "run", "min_clean": None, "min_all": t, "samples": samples})
-            )
-        return ok(json.dumps({"kind": "run", "min_clean": t, "min_all": t, "samples": []}))
-
-    box.on("time_target.py", time_target)
-    box.on("canary.py", ok(json.dumps({"kind": "canary", "min_s": 0.5})))
-
-    def count_ir(cmd: str) -> CommandResult:
-        if not ir_ok:
-            return ok(json.dumps({"kind": "ir", "ir": None, "error": "valgrind missing"}))
-        root = _arg(cmd, "--root")
-        calls = int(_arg(cmd, "--calls"))
-        body = 800 if root == PATCHED_TREE else 1000
-        return ok(json.dumps({"kind": "ir", "ir": 5000 + calls * body, "error": ""}))
-
-    box.on("count_ir.py", count_ir)
-    return box
 
 
 def _judge(box: FakeBox, config: RunConfig, patch_name: str = "precompute") -> Referee:

@@ -32,6 +32,8 @@ class FakeBox:
     files: dict[str, bytes] = field(default_factory=dict)
     commands: list[str] = field(default_factory=list)
     uploads: list[tuple[Path, str]] = field(default_factory=list)
+    downloads: list[tuple[str, Path]] = field(default_factory=list)
+    started: list[tuple[str, dict[str, str]]] = field(default_factory=list)
     terminated: bool = False
     _handlers: list[tuple[str, Handler]] = field(default_factory=list)
 
@@ -59,6 +61,11 @@ class FakeBox:
                 return handler(command) if callable(handler) else handler
         return CommandResult(127, "", f"fake box has no handler for: {command}")
 
+    def start(self, command: str, *, env: Mapping[str, str] | None = None) -> None:
+        if self.terminated:
+            raise BoxError(f"{self.name} is terminated")
+        self.started.append((command, dict(env or {})))
+
     def write(self, path: str, data: bytes) -> None:
         self.files[path] = data
 
@@ -72,6 +79,15 @@ class FakeBox:
         for p in local.rglob("*"):
             if p.is_file():
                 self.files[f"{remote}/{p.relative_to(local)}"] = p.read_bytes()
+
+    def download_dir(self, remote: str, local: Path) -> None:
+        self.downloads.append((remote, local))
+        prefix = remote.rstrip("/") + "/"
+        for path, data in self.files.items():
+            if path.startswith(prefix):
+                target = local / path[len(prefix) :]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(data)
 
     def terminate(self) -> None:
         self.terminated = True
@@ -91,6 +107,11 @@ class FakeBoxFactory:
         if self.prepare is not None:
             self.prepare(box, role)
         self.created.append(box)
+        return box
+
+    def create_control(self, *, name: str, volume: str, mount: str) -> Box:
+        box = self.create(name=name, role="control")
+        box.write(f"{mount}/.volume", volume.encode())
         return box
 
     def reattach(self, box_id: str) -> Box | None:
