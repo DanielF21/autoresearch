@@ -60,14 +60,16 @@ def test_control_record_round_trip(tmp_path: Path) -> None:
         ctl.load_control(tmp_path / "missing.json")
 
 
-def test_launch_starts_a_detached_run_with_the_key_only_in_env() -> None:
+def test_launch_starts_a_detached_run_with_the_keys_only_in_env() -> None:
     box = FakeBox()
-    cmd = ctl.launch(CFG, "configs/t1_w1.toml", box, "sk_secret")
-    assert box.started == [(cmd, {"SAIL_API_KEY": "sk_secret"})]
+    envs = {"SAIL_API_KEY": "sk_secret", "LANGFUSE_SECRET_KEY": "sk-lf-secret"}
+    cmd = ctl.launch(CFG, "configs/t1_w1.toml", box, envs)
+    assert box.started == [(cmd, envs)]
     assert cmd.startswith(f"cd {ctl.PACKAGE_DIR} && nohup {ctl.CLI} run configs/t1_w1.toml")
     assert "/mnt/autoresearch/runs/t1_w1.launch.log" in cmd and cmd.endswith("&")
-    assert "sk_secret" not in cmd
-    cmd = ctl.launch(CFG, "configs/t1_w1.toml", FakeBox(), "k", until=1)
+    # No key may reach the command line: it is visible to anything reading ps.
+    assert "sk_secret" not in cmd and "sk-lf-secret" not in cmd
+    cmd = ctl.launch(CFG, "configs/t1_w1.toml", FakeBox(), {"SAIL_API_KEY": "k"}, until=1)
     assert " --until 1 >>" in cmd
 
 

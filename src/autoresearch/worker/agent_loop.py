@@ -22,10 +22,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from autoresearch import observe
 from autoresearch.boxes.image import GUEST_DIR, REPO_DIR
 from autoresearch.boxes.protocol import Box, BoxError, BoxFactory
 from autoresearch.config import RunConfig
 from autoresearch.model.protocol import ChatModel, Message, ModelError, ToolCall
+from autoresearch.observe import NullTracer, Tracer
 from autoresearch.types import Prediction, StopReason, Usage, WorkerOutput
 from autoresearch.worker import prompt, tools
 from autoresearch.worker.protocol import WorkerInput
@@ -58,10 +60,17 @@ def _call_signature(call: ToolCall) -> str:
 
 
 class AgentLoopWorker:
-    def __init__(self, model: ChatModel, boxes: BoxFactory, config: RunConfig) -> None:
+    def __init__(
+        self,
+        model: ChatModel,
+        boxes: BoxFactory,
+        config: RunConfig,
+        tracer: Tracer | None = None,
+    ) -> None:
         self._model = model
         self._boxes = boxes
         self._config = config
+        self._tracer: Tracer = tracer if tracer is not None else NullTracer()
 
     # ----- box setup -----------------------------------------------------------------
 
@@ -107,6 +116,7 @@ class AgentLoopWorker:
         cfg = self._config.worker
         t0 = time.perf_counter()
         transcript = _Transcript()
+        trace = observe.start_attempt(self._tracer, inp.ref, self._config.run_id, inp.base_sha)
         usage = Usage()
         turns = 0
         box: Box | None = None
@@ -120,6 +130,7 @@ class AgentLoopWorker:
             error: str = "",
         ) -> WorkerOutput:
             transcript.add(kind="end", stop=str(stop), turns=turns, error=error)
+            trace.end(stop, patch=patch, prediction=prediction, error=error)
             return WorkerOutput(
                 patch=patch or None,
                 prediction=prediction,
@@ -139,6 +150,7 @@ class AgentLoopWorker:
             )
             box_id = box.box_id
             transcript.add(kind="box", box_id=box_id)
+            trace.box(box_id)
             self._prepare_box(box, inp)
         except BoxError as e:
             if box is not None:
@@ -180,6 +192,8 @@ class AgentLoopWorker:
                         StopReason.MODEL_ERROR, patch=self._collect_patch(box), error=str(e)
                     )
                 usage = usage + resp.usage
+                # Before the append, so the traced input is what was sent.
+                trace.model_turn(turns, messages, resp)
                 messages.append(resp.message)
                 transcript.add(
                     kind="model",
@@ -209,6 +223,7 @@ class AgentLoopWorker:
                     transcript.add(
                         kind="tool", turn=turns, name=call.name, result=_clip(result.text)
                     )
+                    trace.tool(turns, call.name, call.arguments, result.text)
                     messages.append(
                         {"role": "tool", "tool_call_id": call.id, "content": result.text}
                     )

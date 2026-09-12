@@ -85,6 +85,18 @@ class StorageConfig:
 
 
 @dataclass(frozen=True)
+class ObserveConfig:
+    """Live tracing of worker attempts. Absent section means off.
+
+    A view only: the run directory stays the record, so nothing here changes
+    what a run produces.
+    """
+
+    enabled: bool = False
+    session_prefix: str = ""
+
+
+@dataclass(frozen=True)
 class RunConfig:
     run_id: str
     width: int
@@ -95,6 +107,7 @@ class RunConfig:
     boxes: BoxConfig
     storage: StorageConfig
     source_text: str
+    observe: ObserveConfig = ObserveConfig()
 
     @property
     def config_hash(self) -> str:
@@ -222,7 +235,23 @@ def parse_config(text: str) -> RunConfig:
             mount=_str(storage, "storage", "mount"),
         ),
         source_text=text,
+        observe=_observe(raw.get("observe")),
     )
+
+
+def _observe(section: Any) -> ObserveConfig:
+    """No section means tracing off. A section must say so explicitly."""
+    if section is None:
+        return ObserveConfig()
+    if not isinstance(section, dict):
+        raise ConfigError("[observe] must be a section")
+    enabled = section.get("enabled", False)
+    if not isinstance(enabled, bool):
+        raise ConfigError("[observe].enabled must be true or false")
+    prefix = section.get("session_prefix", "")
+    if not isinstance(prefix, str):
+        raise ConfigError("[observe].session_prefix must be a string")
+    return ObserveConfig(enabled=enabled, session_prefix=prefix)
 
 
 def load_config(path: Path) -> RunConfig:

@@ -12,6 +12,7 @@ find it. Nothing here needs the key except ``launch``.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -121,11 +122,11 @@ def launch_command(config: RunConfig, config_path: str, until: int | None = None
 
 
 def launch(
-    config: RunConfig, config_path: str, box: Box, api_key: str, until: int | None = None
+    config: RunConfig, config_path: str, box: Box, env: Mapping[str, str], until: int | None = None
 ) -> str:
-    """Start the run. The key lives only in this process's environment."""
+    """Start the run. The keys live only in that process's environment."""
     cmd = launch_command(config, config_path, until)
-    box.start(cmd, env={"SAIL_API_KEY": api_key})
+    box.start(cmd, env=env)
     return cmd
 
 

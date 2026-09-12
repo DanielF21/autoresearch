@@ -6,11 +6,12 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import Any
 
 from autoresearch.boxes.fake_box import FakeBox, ok
 from autoresearch.boxes.protocol import CommandResult
 from autoresearch.referee.referee import PATCHED_TREE
-from autoresearch.types import Prediction, StopReason, Usage, WorkerOutput
+from autoresearch.types import AttemptRef, Prediction, StopReason, Usage, WorkerOutput
 from autoresearch.worker.protocol import WorkerInput
 
 BASE_SHA = "c94928ed94899033126c9d47f797a1f698584b20"
@@ -127,6 +128,58 @@ def referee_box(
 
     box.on("count_ir.py", count_ir)
     return box
+
+
+@dataclass
+class FakeAttemptTrace:
+    """Records every call as a tuple, so tests assert on order as well as content."""
+
+    calls: list[tuple[str, Any]] = field(default_factory=list)
+    raises: bool = False
+
+    def _add(self, name: str, payload: Any) -> None:
+        if self.raises:
+            raise RuntimeError(f"tracing is down: {name}")
+        self.calls.append((name, payload))
+
+    def box(self, box_id: str) -> None:
+        self._add("box", box_id)
+
+    def model_turn(self, turn: int, messages: list[Any], response: Any) -> None:
+        self._add("model_turn", (turn, len(messages), response.finish_reason))
+
+    def tool(self, turn: int, name: str, args: dict[str, Any], result: str) -> None:
+        self._add("tool", (turn, name))
+
+    def end(
+        self,
+        stop: StopReason,
+        *,
+        patch: str | None = None,
+        prediction: Prediction | None = None,
+        error: str = "",
+    ) -> None:
+        self._add("end", str(stop))
+
+    @property
+    def kinds(self) -> list[str]:
+        return [k for k, _ in self.calls]
+
+
+@dataclass
+class FakeTracer:
+    attempts: list[FakeAttemptTrace] = field(default_factory=list)
+    raises: bool = False
+
+    def attempt(self, ref: AttemptRef, run_id: str, base_sha: str) -> FakeAttemptTrace:
+        trace = FakeAttemptTrace(raises=self.raises)
+        self.attempts.append(trace)
+        return trace
+
+    @property
+    def only(self) -> FakeAttemptTrace:
+        assert len(self.attempts) == 1, f"expected one attempt, got {len(self.attempts)}"
+        return self.attempts[0]
 
 
 @dataclass

@@ -13,6 +13,9 @@ from pathlib import Path
 
 KEY = "SAIL_API_KEY"
 DOTENV = Path(".env")
+# Forwarded to the control box when present, so a run launched there can trace.
+# Absent keys are simply not forwarded and tracing turns itself off.
+TRACING_KEYS = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY", "LANGFUSE_HOST")
 
 
 def load_dotenv(path: Path = DOTENV) -> None:
@@ -37,3 +40,17 @@ def api_key(path: Path = DOTENV) -> str:
             f"  echo '{KEY}=sk_...' >> {path}"
         )
     return key
+
+
+def launch_env(path: Path = DOTENV) -> dict[str, str]:
+    """What a run launched inside the control box needs in its environment.
+
+    The Sail key is required. Tracing keys are passed on only if they exist, so
+    an unconfigured tracer is a quiet no op rather than a failed launch.
+    """
+    envs = {KEY: api_key(path)}
+    for name in TRACING_KEYS:
+        value = os.environ.get(name, "")
+        if value:
+            envs[name] = value
+    return envs

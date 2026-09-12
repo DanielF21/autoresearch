@@ -49,6 +49,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 def cmd_run(args: argparse.Namespace) -> int:
+    from autoresearch import observe
     from autoresearch.boxes.sail_box import SailBoxFactory
     from autoresearch.model.sail_model import SailChatModel
     from autoresearch.orchestrator import run as run_mod
@@ -62,7 +63,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     docs = profile_docs_from_repo(root, cfg)
     paths = run_mod.init_run(cfg, run_dir, docs)
     boxes = SailBoxFactory(cfg)
-    worker = AgentLoopWorker(SailChatModel(cfg.worker), boxes, cfg)
+    worker = AgentLoopWorker(SailChatModel(cfg.worker), boxes, cfg, observe.build_tracer(cfg))
     log = paths.root / "run.log"
     last = run_mod.run(cfg, paths, worker, boxes, until_round=args.until, log=log)
     print(f"completed through round {last} of {cfg.rounds} in {paths.root}")

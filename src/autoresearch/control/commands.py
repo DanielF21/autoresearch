@@ -12,8 +12,8 @@ from autoresearch.config import load_config
 from autoresearch.control import deploy as ctl
 
 
-def _api_key() -> str:
-    return env.api_key()
+def _launch_env() -> dict[str, str]:
+    return env.launch_env()
 
 
 def cmd_deploy(args: argparse.Namespace) -> int:
@@ -45,8 +45,11 @@ def _control_box(config_path: str) -> tuple[object, object]:
 
 def cmd_launch(args: argparse.Namespace) -> int:
     cfg, box = _control_box(args.config)
-    cmd = ctl.launch(cfg, args.config, box, _api_key(), args.until)  # type: ignore[arg-type]
+    envs = _launch_env()
+    cmd = ctl.launch(cfg, args.config, box, envs, args.until)  # type: ignore[arg-type]
+    traced = [k for k in env.TRACING_KEYS if k in envs]
     print(f"started in the control box: {cmd}")
+    print("tracing keys forwarded: " + (", ".join(traced) if traced else "none"))
     print("read progress with: autoresearch remote-status " + args.config)
     return 0
 

@@ -46,3 +46,9 @@ disk_gib = 32
 [storage]
 volume = "autoresearch"
 mount = "/mnt/autoresearch"
+
+[observe]
+# Live tracing of worker attempts in Langfuse. A view only: the run directory
+# stays the record. Keys come from the environment, and without them this is a
+# quiet no op.
+enabled = true
