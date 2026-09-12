@@ -35,8 +35,12 @@ class FakeBox:
     terminated: bool = False
     _handlers: list[tuple[str, Handler]] = field(default_factory=list)
 
-    def on(self, substring: str, handler: Handler) -> FakeBox:
-        self._handlers.append((substring, handler))
+    def on(self, substring: str, handler: Handler, *, first: bool = False) -> FakeBox:
+        """Register a handler. ``first`` puts it ahead of earlier, broader matches."""
+        if first:
+            self._handlers.insert(0, (substring, handler))
+        else:
+            self._handlers.append((substring, handler))
         return self
 
     def run(
