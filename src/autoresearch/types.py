@@ -124,8 +124,11 @@ class WorkerOutput:
     usage: Usage
     wall_s: float
     error: str = ""
+    transcript: str = ""
+    box_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
+        """The summary written to output.json. The transcript and patch go to their own files."""
         return {
             "has_patch": self.patch is not None,
             "prediction": None if self.prediction is None else self.prediction.to_dict(),
@@ -134,6 +137,7 @@ class WorkerOutput:
             "usage": self.usage.to_dict(),
             "wall_s": self.wall_s,
             "error": self.error,
+            "box_id": self.box_id,
         }
 
 
