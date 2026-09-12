@@ -3,6 +3,11 @@
 Every record here is a frozen dataclass. Each one that is written to the run
 directory has ``to_dict`` and ``from_dict`` so the on disk form is explicit and
 the round trip is tested. Nothing here imports the Sail SDK.
+
+There is no verdict anywhere. The referee returns a ``Measurement``: every fact
+it could establish about a patch against the base. What those facts mean is
+derived where it is needed, by the label ``clears_noise`` and by the status
+command, never decided by the referee.
 """
 
 from __future__ import annotations
@@ -10,22 +15,6 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass, field
 from typing import Any
-
-
-class Verdict(enum.StrEnum):
-    """The referee's decision on one attempt, or why it never got one."""
-
-    ACCEPTED = "accepted"
-    REJECTED_SCOPE = "rejected_scope"
-    REJECTED_APPLY = "rejected_apply"
-    REJECTED_TESTS_MODULE = "rejected_tests_module"
-    REJECTED_TESTS_FULL = "rejected_tests_full"
-    REJECTED_BELOW_THRESHOLD = "rejected_below_threshold"
-    DUPLICATE = "duplicate"
-    SUPERSEDED = "superseded"
-    NO_PATCH = "no_patch"
-    UNMEASURABLE = "unmeasurable"
-    FAILED = "failed"
 
 
 class StopReason(enum.StrEnum):
@@ -176,9 +165,9 @@ class SuiteResult:
 
 @dataclass(frozen=True)
 class PairTiming:
-    """One back to back pair: the incumbent timed once and the patched tree timed once.
+    """One back to back pair: the base tree timed once and the patched tree timed once.
 
-    ``ratio`` is incumbent seconds over patched seconds, so above 1 means the patch
+    ``ratio`` is base seconds over patched seconds, so above 1 means the patch
     was faster in this pair. A contaminated pair is one where either launch tripped a
     provenance guard; it is kept in the record and excluded from the median.
     """
@@ -186,21 +175,21 @@ class PairTiming:
     index: int
     order: str
     hash_seed: int
-    incumbent_s: float
+    base_s: float
     patched_s: float
     contaminated: bool
     reasons: tuple[str, ...] = ()
 
     @property
     def ratio(self) -> float:
-        return self.incumbent_s / self.patched_s
+        return self.base_s / self.patched_s
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "index": self.index,
             "order": self.order,
             "hash_seed": self.hash_seed,
-            "incumbent_s": self.incumbent_s,
+            "base_s": self.base_s,
             "patched_s": self.patched_s,
             "ratio": self.ratio,
             "contaminated": self.contaminated,
@@ -213,7 +202,7 @@ class PairTiming:
             index=int(d["index"]),
             order=str(d["order"]),
             hash_seed=int(d["hash_seed"]),
-            incumbent_s=float(d["incumbent_s"]),
+            base_s=float(d["base_s"]),
             patched_s=float(d["patched_s"]),
             contaminated=bool(d["contaminated"]),
             reasons=tuple(str(r) for r in d.get("reasons", [])),
@@ -224,19 +213,19 @@ class PairTiming:
 class IrCounts:
     """Instruction counts from cachegrind for both trees, one call of the target each."""
 
-    incumbent: int
+    base: int
     patched: int
 
     @property
     def delta_pct(self) -> float:
-        return 100.0 * (self.patched - self.incumbent) / self.incumbent
+        return 100.0 * (self.patched - self.base) / self.base
 
     def to_dict(self) -> dict[str, Any]:
-        return {"incumbent": self.incumbent, "patched": self.patched, "delta_pct": self.delta_pct}
+        return {"base": self.base, "patched": self.patched, "delta_pct": self.delta_pct}
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> IrCounts:
-        return cls(incumbent=int(d["incumbent"]), patched=int(d["patched"]))
+        return cls(base=int(d["base"]), patched=int(d["patched"]))
 
 
 @dataclass(frozen=True)
@@ -266,48 +255,91 @@ class Provenance:
 
 
 @dataclass(frozen=True)
-class RefereeResult:
-    """The referee's full account of one attempt."""
+class Measurement:
+    """Every fact the referee could establish about one patch against the base.
 
-    verdict: Verdict
-    reason: str
-    threshold: float
+    Steps that could not run leave their field empty or None and add a line to
+    ``errors``. Nothing here is a decision. ``clears_noise`` is the one derived
+    label: the patch applied, was in scope, passed both suites, computed the same
+    result, and its median ratio reached the noise floor.
+    """
+
+    noise_floor: float
+    applied: bool = False
+    apply_error: str = ""
+    scope_violations: tuple[str, ...] = ()
+    tests: tuple[SuiteResult, ...] = ()
+    base_fp: str = ""
+    patched_fp: str = ""
+    canary_s: float | None = None
     pairs: tuple[PairTiming, ...] = ()
     median_ratio: float | None = None
     ir: IrCounts | None = None
-    tests: tuple[SuiteResult, ...] = ()
-    canary_s: float | None = None
+    errors: tuple[str, ...] = ()
     provenance: Provenance = field(default_factory=Provenance)
     wall_s: float = 0.0
 
+    @property
+    def tests_pass(self) -> bool:
+        scopes = {t.scope: t.ok for t in self.tests}
+        return bool(scopes) and all(scopes.values()) and "module" in scopes and "full" in scopes
+
+    @property
+    def result_matches(self) -> bool | None:
+        if not self.base_fp or not self.patched_fp:
+            return None
+        return self.base_fp == self.patched_fp
+
+    @property
+    def clears_noise(self) -> bool:
+        return (
+            self.applied
+            and not self.scope_violations
+            and self.tests_pass
+            and self.result_matches is True
+            and self.median_ratio is not None
+            and self.median_ratio >= self.noise_floor
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
-            "verdict": str(self.verdict),
-            "reason": self.reason,
-            "threshold": self.threshold,
+            "noise_floor": self.noise_floor,
+            "applied": self.applied,
+            "apply_error": self.apply_error,
+            "scope_violations": list(self.scope_violations),
+            "tests": [t.to_dict() for t in self.tests],
+            "tests_pass": self.tests_pass,
+            "base_fp": self.base_fp,
+            "patched_fp": self.patched_fp,
+            "result_matches": self.result_matches,
+            "canary_s": self.canary_s,
             "pairs": [p.to_dict() for p in self.pairs],
             "median_ratio": self.median_ratio,
+            "clears_noise": self.clears_noise,
             "ir": None if self.ir is None else self.ir.to_dict(),
-            "tests": [t.to_dict() for t in self.tests],
-            "canary_s": self.canary_s,
+            "errors": list(self.errors),
             "provenance": self.provenance.to_dict(),
             "wall_s": self.wall_s,
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> RefereeResult:
+    def from_dict(cls, d: dict[str, Any]) -> Measurement:
         ir = d.get("ir")
         median = d.get("median_ratio")
         canary = d.get("canary_s")
         return cls(
-            verdict=Verdict(d["verdict"]),
-            reason=str(d.get("reason", "")),
-            threshold=float(d["threshold"]),
+            noise_floor=float(d["noise_floor"]),
+            applied=bool(d.get("applied", False)),
+            apply_error=str(d.get("apply_error", "")),
+            scope_violations=tuple(str(v) for v in d.get("scope_violations", [])),
+            tests=tuple(SuiteResult.from_dict(t) for t in d.get("tests", [])),
+            base_fp=str(d.get("base_fp", "")),
+            patched_fp=str(d.get("patched_fp", "")),
+            canary_s=None if canary is None else float(canary),
             pairs=tuple(PairTiming.from_dict(p) for p in d.get("pairs", [])),
             median_ratio=None if median is None else float(median),
             ir=None if ir is None else IrCounts.from_dict(ir),
-            tests=tuple(SuiteResult.from_dict(t) for t in d.get("tests", [])),
-            canary_s=None if canary is None else float(canary),
+            errors=tuple(str(e) for e in d.get("errors", [])),
             provenance=Provenance.from_dict(d.get("provenance", {})),
             wall_s=float(d.get("wall_s", 0.0)),
         )
@@ -315,25 +347,30 @@ class RefereeResult:
 
 @dataclass(frozen=True)
 class Attempt:
-    """One attempt as it appears in history: what was tried and what the referee said.
+    """One attempt as it appears in history: what was tried and what was measured.
 
-    This is the unit the worker reads. ``result`` is None only while the referee has
-    not run, which never happens for an attempt in a completed round.
+    This is the unit the worker reads. ``measurement`` is None only when the
+    attempt produced no patch, in which case ``skipped`` says so, or while the
+    referee has not run, which never happens for an attempt in a completed round.
+    ``duplicate_of`` names an earlier attempt with the same normalised diff; the
+    attempt is still measured in full.
     """
 
     ref: AttemptRef
-    incumbent_sha: str
+    base_sha: str
     patch: str | None
     prediction: Prediction | None
     rationale: str
     stop_reason: StopReason
     usage: Usage
     wall_s: float
-    result: RefereeResult | None
+    measurement: Measurement | None
+    skipped: str = ""
+    duplicate_of: str = ""
 
     @property
-    def verdict(self) -> Verdict | None:
-        return None if self.result is None else self.result.verdict
+    def clears_noise(self) -> bool:
+        return self.measurement is not None and self.measurement.clears_noise
 
 
 @dataclass(frozen=True)
@@ -342,9 +379,10 @@ class RoundRecord:
 
     round: int
     attempt_numbers: tuple[int, ...]
-    incumbent_sha_before: str
-    incumbent_sha_after: str
-    accepted_numbers: tuple[int, ...]
+    base_sha: str
+    measured_numbers: tuple[int, ...]
+    clears_noise_numbers: tuple[int, ...]
+    best_ratio_so_far: float | None
     worker_wall_s: float
     referee_wall_s: float
     usage: Usage
@@ -355,9 +393,10 @@ class RoundRecord:
         return {
             "round": self.round,
             "attempt_numbers": list(self.attempt_numbers),
-            "incumbent_sha_before": self.incumbent_sha_before,
-            "incumbent_sha_after": self.incumbent_sha_after,
-            "accepted_numbers": list(self.accepted_numbers),
+            "base_sha": self.base_sha,
+            "measured_numbers": list(self.measured_numbers),
+            "clears_noise_numbers": list(self.clears_noise_numbers),
+            "best_ratio_so_far": self.best_ratio_so_far,
             "worker_wall_s": self.worker_wall_s,
             "referee_wall_s": self.referee_wall_s,
             "usage": self.usage.to_dict(),
@@ -367,12 +406,14 @@ class RoundRecord:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> RoundRecord:
+        best = d.get("best_ratio_so_far")
         return cls(
             round=int(d["round"]),
             attempt_numbers=tuple(int(n) for n in d["attempt_numbers"]),
-            incumbent_sha_before=str(d["incumbent_sha_before"]),
-            incumbent_sha_after=str(d["incumbent_sha_after"]),
-            accepted_numbers=tuple(int(n) for n in d["accepted_numbers"]),
+            base_sha=str(d["base_sha"]),
+            measured_numbers=tuple(int(n) for n in d.get("measured_numbers", [])),
+            clears_noise_numbers=tuple(int(n) for n in d.get("clears_noise_numbers", [])),
+            best_ratio_so_far=None if best is None else float(best),
             worker_wall_s=float(d["worker_wall_s"]),
             referee_wall_s=float(d["referee_wall_s"]),
             usage=Usage.from_dict(d.get("usage", {})),

@@ -5,7 +5,7 @@ from autoresearch.boxes.fake_box import FakeBox, fail, ok
 from autoresearch.boxes.image import REPO_DIR
 from autoresearch.config import load_config
 from autoresearch.worker.tools import (
-    BASELINE_DIR,
+    BASE_DIR,
     HISTORY_DIR,
     TOOL_BY_NAME,
     TOOL_SPECS,
@@ -119,14 +119,14 @@ def test_run_benchmark_alternates_order_and_reports_ratio() -> None:
     roots: list[str] = []
 
     def handler(cmd: str) -> object:
-        root = BASELINE_DIR if BASELINE_DIR in cmd else REPO_DIR
+        root = BASE_DIR if BASE_DIR in cmd else REPO_DIR
         roots.append(root)
-        return ok(json.dumps({"min_all": 1.0 if root == BASELINE_DIR else 0.8}))
+        return ok(json.dumps({"min_all": 1.0 if root == BASE_DIR else 0.8}))
 
     box = FakeBox().on("time_target.py", handler)  # type: ignore[arg-type]
     r = execute(ctx(box), "run_benchmark", {})
     assert r.text.startswith("indicative speedup 1.250x")
-    assert roots == [BASELINE_DIR, REPO_DIR, REPO_DIR, BASELINE_DIR]
+    assert roots == [BASE_DIR, REPO_DIR, REPO_DIR, BASE_DIR]
 
 
 def test_shell_runs_in_repo_and_appends_exit_code() -> None:

@@ -1,6 +1,13 @@
-"""The three hand written patches used by Phase 2b check 1. Each must be in scope
+"""The four hand written patches used by Phase 2b check 1. Each must be in scope
 and touch only the hot file. Whether they apply to the pinned commit was checked
-by hand with git apply on 2026-09-11 and is rechecked by check 1 on a real box."""
+by hand with git apply on 2026-09-11 and is rechecked by check 1 on a real box.
+
+What check 1 expects to measure, as facts, not verdicts:
+- whitespace: tests pass, result matches, median ratio near 1, does not clear noise
+- slowdown: tests pass, result matches, median ratio below 1
+- precompute: tests pass, result matches, median ratio well above the noise floor
+- wrong_result: tests fail, result differs, and timing still runs and is recorded
+"""
 
 from pathlib import Path
 
@@ -11,7 +18,7 @@ from autoresearch.patch import changed_files, changed_line_count, normalised_has
 
 ROOT = Path(__file__).parent.parent
 PATCHES = ROOT / "tests" / "fixtures" / "patches"
-NAMES = ("whitespace", "slowdown", "precompute")
+NAMES = ("whitespace", "slowdown", "precompute", "wrong_result")
 
 
 @pytest.mark.parametrize("name", NAMES)
@@ -25,4 +32,4 @@ def test_fixture_patch_is_in_scope_and_touches_only_the_hot_file(name: str) -> N
 
 def test_fixture_patches_are_distinct() -> None:
     hashes = {normalised_hash((PATCHES / f"{n}.diff").read_text()) for n in NAMES}
-    assert len(hashes) == 3
+    assert len(hashes) == 4

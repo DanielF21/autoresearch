@@ -2,8 +2,6 @@
 
 A run directory is a git repository of its own. After every round it is
 committed, so the volume holds a history of the run and ``fetch`` can pull it.
-The nested incumbent repository is ignored by that outer repository and is
-rebuilt from the accepted patches if it is ever missing.
 
 Resume is implicit: the loop starts after the last round in rounds.jsonl. An
 attempt directory left behind by a crashed round is detected and the run
@@ -17,14 +15,14 @@ import os
 import subprocess
 from pathlib import Path
 
-from autoresearch import history, incumbent
+from autoresearch import history
 from autoresearch.boxes.protocol import BoxFactory
 from autoresearch.config import RunConfig
 from autoresearch.orchestrator.pool import RefereePool
-from autoresearch.orchestrator.round import rebuild_incumbent, run_round
+from autoresearch.orchestrator.round import run_round
 from autoresearch.worker.protocol import Worker
 
-RUN_GITIGNORE = "incumbent/\nLOCK\n"
+RUN_GITIGNORE = "LOCK\n"
 
 
 class RunError(RuntimeError):
@@ -47,7 +45,6 @@ def init_run(
             raise RunError(
                 f"{run_dir} was created with a different config; a run's config never changes"
             )
-        rebuild_incumbent(config, paths)
         return paths
     run_dir.mkdir(parents=True, exist_ok=True)
     paths.config.write_text(config.source_text)
@@ -59,7 +56,6 @@ def init_run(
     _git(run_dir, "init", "-q")
     _git(run_dir, "config", "user.email", "orchestrator@autoresearch")
     _git(run_dir, "config", "user.name", "autoresearch")
-    rebuild_incumbent(config, paths)
     commit_run(paths, "run initialised")
     return paths
 
@@ -104,12 +100,6 @@ def run(
             return start - 1
         pool = RefereePool(config, paths, boxes)
         pool.start()
-        inc = paths.incumbent
-        pool.sync_all(
-            config.target.sha,
-            incumbent.cumulative_diff(inc, config.target.sha),
-            incumbent.tree_hash(inc),
-        )
         last = start - 1
         for round_no in range(start, stop + 1):
             outcome = run_round(round_no, config, paths, worker, pool)
@@ -118,9 +108,11 @@ def run(
             if log is not None:
                 with log.open("a") as fh:
                     r = outcome.record
+                    best = "none" if r.best_ratio_so_far is None else f"{r.best_ratio_so_far:.4f}"
                     fh.write(
-                        f"round {r.round}: attempts {list(r.attempt_numbers)} accepted "
-                        f"{list(r.accepted_numbers)} worker {r.worker_wall_s:.0f}s referee "
+                        f"round {r.round}: attempts {list(r.attempt_numbers)} measured "
+                        f"{list(r.measured_numbers)} real speedups {list(r.clears_noise_numbers)} "
+                        f"best so far {best} worker {r.worker_wall_s:.0f}s referee "
                         f"{r.referee_wall_s:.0f}s errors {len(r.errors)}\n"
                     )
         if last >= config.rounds:

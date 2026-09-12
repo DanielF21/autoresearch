@@ -4,17 +4,16 @@ from __future__ import annotations
 
 import json
 import re
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
 
-from autoresearch import incumbent
 from autoresearch.boxes.fake_box import FakeBox, ok
 from autoresearch.boxes.protocol import CommandResult
 from autoresearch.referee.referee import PATCHED_TREE
 from autoresearch.types import Prediction, StopReason, Usage, WorkerOutput
 from autoresearch.worker.protocol import WorkerInput
+
+BASE_SHA = "c94928ed94899033126c9d47f797a1f698584b20"
 
 DIFF_TEMPLATE = (
     "diff --git a/networkx/algorithms/cluster.py b/networkx/algorithms/cluster.py\n"
@@ -41,25 +40,25 @@ def referee_box(
     box: FakeBox | None = None,
     *,
     speedup: float | Callable[[str], float] = 1.05,
+    head: str = BASE_SHA,
     apply_ok: bool = True,
     module_ok: bool = True,
     full_ok: bool = True,
     fp_match: bool = True,
+    patched_verify_fails: bool = False,
     contaminate_pairs: bool = False,
     ir_ok: bool = True,
     cleanup_ok: bool = True,
-    tree_oracle: Callable[[str], CommandResult] | None = None,
 ) -> FakeBox:
-    """A referee box whose patched tree runs ``speedup`` times faster than its incumbent.
+    """A referee box whose patched tree runs ``speedup`` times faster than the base.
 
     ``speedup`` may be a function of the patch text written to the box, so one
-    box can answer differently per attempt.
+    box can answer differently per attempt. ``head`` is what the box reports
+    after checking out the base; the referee refuses anything but the base sha.
     """
     box = box if box is not None else FakeBox()
 
-    box.on("git rev-parse HEAD", ok("boxhead\n"))
-    if tree_oracle is not None:
-        box.on("git checkout -q --detach", tree_oracle, first=True)
+    box.on("git checkout -q --detach", ok(f"{head}\n"))
 
     def apply_patch(cmd: str) -> CommandResult:
         if "--remove" in cmd:
@@ -103,6 +102,8 @@ def referee_box(
         root = arg(cmd, "--root")
         patched = root == PATCHED_TREE
         if "--verify" in cmd:
+            if patched and patched_verify_fails:
+                return ok(json.dumps({"error": "RecursionError in patched tree"}))
             fp = "fp_same" if (fp_match or not patched) else "fp_other"
             return ok(json.dumps({"kind": "verify", "hot_executed": True, "result_fp": fp}))
         t = 1.0 / current_speedup() if patched else 1.0
@@ -126,24 +127,6 @@ def referee_box(
 
     box.on("count_ir.py", count_ir)
     return box
-
-
-def tree_oracle(box: FakeBox, origin: Path, base_sha: str) -> Callable[[str], CommandResult]:
-    """Answer the incumbent sync the way a real box would: apply the stack diff the
-    orchestrator wrote to the box onto a local clone of the same origin and report
-    that clone's tree hash. The orchestrator then sees the hash it expects."""
-
-    def handler(cmd: str) -> CommandResult:
-        stack = box.files.get("/workspace/work/incumbent.diff", b"").decode()
-        with tempfile.TemporaryDirectory() as tmp:
-            clone = Path(tmp) / "clone"
-            incumbent.clone_at(str(origin), base_sha, clone)
-            if stack.strip():
-                incumbent.apply_and_commit(clone, stack, "stack")
-            tree = incumbent.tree_hash(clone)
-        return ok(f"boxhead_{tree[:6]}\n{tree}\n")
-
-    return handler
 
 
 @dataclass

@@ -19,7 +19,7 @@ from autoresearch.boxes.protocol import Box, BoxError
 from autoresearch.config import TargetSpec
 
 HISTORY_DIR = "/workspace/history"
-BASELINE_DIR = "/workspace/baseline"
+BASE_DIR = "/workspace/base"
 MAX_OUTPUT = 12_000
 DEFAULT_READ_LINES = 300
 SHELL_TIMEOUT_MAX = 900
@@ -34,7 +34,7 @@ class ToolContext:
     box: Box
     target: TargetSpec
     repo: str = REPO_DIR
-    baseline: str = BASELINE_DIR
+    base: str = BASE_DIR
 
 
 @dataclass(frozen=True)
@@ -62,7 +62,7 @@ def _path(ctx: ToolContext, raw: Any, base: str | None = None) -> str:
     if not isinstance(raw, str) or not raw:
         raise ToolError("path must be a non empty string")
     if raw.startswith("/"):
-        if raw.startswith((ctx.repo, HISTORY_DIR, ctx.baseline)):
+        if raw.startswith((ctx.repo, HISTORY_DIR, ctx.base)):
             return raw
         raise ToolError(f"absolute paths must be under {ctx.repo} or {HISTORY_DIR}")
     parts = [p for p in raw.split("/") if p not in ("", ".")]
@@ -182,8 +182,9 @@ def run_tests(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
 
 
 def run_benchmark(ctx: ToolContext, _args: dict[str, Any]) -> ToolResult:
-    """Two back to back pairs of the working tree against the pristine baseline.
-    Noisy by design: it tells the worker whether it is warm or cold, not the verdict."""
+    """Two back to back pairs of the working tree against the untouched base commit.
+    Noisy by design: it tells the worker whether it is warm or cold. The referee's
+    six pairs are the measurement that goes into history."""
     t = ctx.target
     common = [
         "--graph",
@@ -197,19 +198,20 @@ def run_benchmark(ctx: ToolContext, _args: dict[str, Any]) -> ToolResult:
         "--no-counters",
     ]
     ratios: list[float] = []
-    for order in (("baseline", "working"), ("working", "baseline")):
+    for order in (("base", "working"), ("working", "base")):
         times: dict[str, float] = {}
         for which in order:
-            root = ctx.baseline if which == "baseline" else ctx.repo
+            root = ctx.base if which == "base" else ctx.repo
             rec = _guest(ctx, "time_target.py", "--root", root, *common, timeout=600)
             if rec.get("error"):
                 return ToolResult(f"error: {rec['error']}")
             times[which] = float(rec["min_all"])
-        ratios.append(times["baseline"] / times["working"])
+        ratios.append(times["base"] / times["working"])
     mean = sum(ratios) / len(ratios)
     return ToolResult(
         f"indicative speedup {mean:.3f}x (pairs: {ratios[0]:.3f}, {ratios[1]:.3f}). "
-        "This is 2 pairs on a shared machine; the referee uses 6 pairs and a 1.0106 threshold."
+        "This is 2 pairs on a shared machine; the referee uses 6 pairs, and only a median "
+        "ratio at or above the noise floor of 1.0106 counts as a real speedup."
     )
 
 
@@ -312,8 +314,8 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         "run_benchmark",
-        "Time the target on your working tree against the untouched baseline, two back to back "
-        "pairs. Indicative only: noisy, and not the referee's measurement.",
+        "Time the target on your working tree against the untouched base commit, two back to "
+        "back pairs. Indicative only: noisy, and not the referee's measurement.",
         _params({}, []),
         run_benchmark,
     ),

@@ -1,4 +1,10 @@
-"""The totals read at the round 20 gate, computed from the run directory alone."""
+"""The totals read at the round 20 gate, computed from the run directory alone.
+
+Counts are of facts, not decisions: how many attempts were measured, how many
+passed the tests, how many cleared the noise floor. Best so far is the highest
+median ratio among attempts that cleared it; the best raw ratio over every
+timed attempt is shown beside it so the two cannot be confused.
+"""
 
 from __future__ import annotations
 
@@ -7,7 +13,7 @@ from collections import Counter
 from dataclasses import dataclass
 
 from autoresearch import history
-from autoresearch.types import Usage, Verdict
+from autoresearch.types import Usage
 
 
 @dataclass(frozen=True)
@@ -16,11 +22,15 @@ class RunStatus:
     rounds_done: int
     rounds_total: int
     attempts: int
-    by_verdict: dict[str, int]
+    measured: int
+    no_patch: int
+    duplicates: int
+    tests_pass: int
+    clears_noise: int
     by_stop: dict[str, int]
-    accepted: int
     best_ratio: float | None
-    cumulative_ratio: float
+    best_attempt: int | None
+    best_raw_ratio: float | None
     worker_wall_median_s: float | None
     referee_wall_median_s: float | None
     round_wall_median_s: float | None
@@ -32,14 +42,22 @@ class RunStatus:
 
     def render(self) -> str:
         lines = [
-            f"run {self.run_id}: {self.rounds_done} of {self.rounds_total} rounds, {self.attempts} attempts",
-            f"accepted {self.accepted}; best single ratio {self.best_ratio:.4f}"
-            if self.best_ratio is not None
-            else "accepted 0",
-            f"cumulative incumbent speedup {self.cumulative_ratio:.4f}",
-            "verdicts: " + ", ".join(f"{k} {v}" for k, v in sorted(self.by_verdict.items())),
-            "worker stops: " + ", ".join(f"{k} {v}" for k, v in sorted(self.by_stop.items())),
+            f"run {self.run_id}: {self.rounds_done} of {self.rounds_total} rounds, "
+            f"{self.attempts} attempts",
+            f"measured {self.measured}, no patch {self.no_patch}, duplicates {self.duplicates}, "
+            f"tests pass {self.tests_pass}, real speedups {self.clears_noise}",
         ]
+        if self.best_ratio is not None:
+            lines.append(
+                f"best real speedup so far {self.best_ratio:.4f} (attempt {self.best_attempt:04d})"
+            )
+        else:
+            lines.append("best real speedup so far: none")
+        if self.best_raw_ratio is not None:
+            lines.append(f"best raw ratio over all timed attempts {self.best_raw_ratio:.4f}")
+        lines.append(
+            "worker stops: " + ", ".join(f"{k} {v}" for k, v in sorted(self.by_stop.items()))
+        )
         if self.worker_wall_median_s is not None:
             lines.append(
                 f"median wall per round: worker {self.worker_wall_median_s:.0f}s, "
@@ -77,13 +95,11 @@ def compute_status(
 ) -> RunStatus:
     attempts = history.load_history(paths)
     rounds = history.read_rounds(paths)
-    by_verdict = Counter(str(a.verdict) if a.verdict else "pending" for a in attempts)
-    by_stop = Counter(str(a.stop_reason) for a in attempts)
-    accepted = [a for a in attempts if a.verdict == Verdict.ACCEPTED and a.result is not None]
-    ratios = [a.result.median_ratio for a in accepted if a.result and a.result.median_ratio]
-    cumulative = 1.0
-    for r in ratios:
-        cumulative *= r
+    measured = [a for a in attempts if a.measurement is not None]
+    timed = [
+        a.measurement.median_ratio for a in measured if a.measurement and a.measurement.median_ratio
+    ]
+    best, which = history.best_ratio(attempts)
     usage = Usage()
     for a in attempts:
         usage = usage + a.usage
@@ -98,15 +114,19 @@ def compute_status(
         rounds_done=len(rounds),
         rounds_total=rounds_total,
         attempts=n,
-        by_verdict=dict(by_verdict),
-        by_stop=dict(by_stop),
-        accepted=len(accepted),
-        best_ratio=max(ratios) if ratios else None,
-        cumulative_ratio=cumulative,
+        measured=len(measured),
+        no_patch=sum(1 for a in attempts if a.skipped),
+        duplicates=sum(1 for a in attempts if a.duplicate_of),
+        tests_pass=sum(1 for a in measured if a.measurement and a.measurement.tests_pass),
+        clears_noise=sum(1 for a in measured if a.clears_noise),
+        by_stop=dict(Counter(str(a.stop_reason) for a in attempts)),
+        best_ratio=best,
+        best_attempt=which,
+        best_raw_ratio=max(timed) if timed else None,
         worker_wall_median_s=statistics.median(r.worker_wall_s for r in rounds) if rounds else None,
-        referee_wall_median_s=statistics.median(r.referee_wall_s for r in rounds)
-        if rounds
-        else None,
+        referee_wall_median_s=(
+            statistics.median(r.referee_wall_s for r in rounds) if rounds else None
+        ),
         round_wall_median_s=(
             statistics.median(r.worker_wall_s + r.referee_wall_s for r in rounds)
             if rounds

@@ -13,15 +13,16 @@ from autoresearch.model.protocol import ModelError
 from autoresearch.types import Attempt as HistoryAttempt
 from autoresearch.types import (
     AttemptRef,
+    Measurement,
     Prediction,
-    RefereeResult,
     StopReason,
+    SuiteResult,
     Usage,
-    Verdict,
 )
 from autoresearch.worker.agent_loop import AgentLoopWorker
 from autoresearch.worker.protocol import WorkerInput
-from autoresearch.worker.tools import BASELINE_DIR, HISTORY_DIR
+from autoresearch.worker.tools import BASE_DIR, HISTORY_DIR
+from tests.helpers import BASE_SHA
 
 ROOT = Path(__file__).parent.parent
 DIFF = "diff --git a/networkx/algorithms/cluster.py b/networkx/algorithms/cluster.py\n--- a\n+++ b\n@@ -1 +1 @@\n-a\n+b\n"
@@ -35,7 +36,7 @@ def config() -> RunConfig:
 def prepare(box: FakeBox, role: str) -> None:
     """A worker box whose setup succeeds and whose git diff returns DIFF."""
     assert role == "worker"
-    box.on("git checkout -q --detach", ok("tree_ok\n"))
+    box.on("git checkout -q --detach", ok(f"{BASE_SHA}\n"))
     box.on("git add -N", ok(DIFF))
     box.on("awk", ok("     1\tdef f(): pass\n"))
     box.on(
@@ -47,9 +48,7 @@ def prepare(box: FakeBox, role: str) -> None:
 def make_input(config: RunConfig, history: tuple[HistoryAttempt, ...] = ()) -> WorkerInput:
     return WorkerInput(
         ref=AttemptRef(number=len(history) + 1, round=1, worker=0),
-        incumbent_sha="c94928ed9489",
-        incumbent_tree="tree_ok",
-        stack_diff="",
+        base_sha=BASE_SHA,
         target=config.target,
         history=history,
         docs=(("profile.txt", "cluster.py:160 82% self time"),),
@@ -90,12 +89,11 @@ def test_happy_path_submits_a_diff(config: RunConfig) -> None:
     box = box_holder[0]
     assert box.terminated
     assert box.read(f"{REPO_DIR}/networkx/algorithms/cluster.py") == b"b\n"
-    assert box.files["/workspace/incumbent.diff"] == b""
+    assert "/workspace/incumbent.diff" not in box.files
     setup_cmd = next(c for c in box.commands if "git checkout -q --detach" in c)
-    assert (
-        f"--detach {config.target.sha} " in setup_cmd
-    )  # the pinned commit, never the orchestrator's id
-    assert any(BASELINE_DIR in c for c in box.commands)
+    assert f"--detach {BASE_SHA} " in setup_cmd
+    assert "git apply" not in setup_cmd
+    assert any(BASE_DIR in c for c in box.commands)
     assert ("/workspace/guest/provenance.py") in box.files
 
     first = model.requests[0]
@@ -113,15 +111,23 @@ def test_happy_path_submits_a_diff(config: RunConfig) -> None:
 def test_history_is_rendered_and_uploaded(config: RunConfig) -> None:
     earlier = HistoryAttempt(
         ref=AttemptRef(1, 1, 0),
-        incumbent_sha="c94928ed9489",
+        base_sha=BASE_SHA,
         patch=DIFF,
         prediction=Prediction(1.5),
         rationale="tried caching",
         stop_reason=StopReason.SUBMITTED,
         usage=Usage(),
         wall_s=10.0,
-        result=RefereeResult(
-            Verdict.REJECTED_BELOW_THRESHOLD, "median 1.002 < 1.0106", 1.0106, median_ratio=1.002
+        measurement=Measurement(
+            noise_floor=1.0106,
+            applied=True,
+            tests=(
+                SuiteResult("module", 5, 0, 0, 1, True),
+                SuiteResult("full", 9, 1, 0, 60, False),
+            ),
+            base_fp="a",
+            patched_fp="a",
+            median_ratio=1.002,
         ),
     )
     boxes: list[FakeBox] = []
@@ -136,11 +142,12 @@ def test_history_is_rendered_and_uploaded(config: RunConfig) -> None:
     )
     AgentLoopWorker(model, factory, config).attempt(make_input(config, (earlier,)))
     content = model.requests[0][1]["content"]
-    assert "1 earlier attempts, 0 accepted" in content
-    assert "tried caching" in content and "rejected_below_threshold" in content and "+b" in content
+    assert "1 earlier attempts, 0 real speedups" in content
+    assert "tried caching" in content and "full FAIL" in content and "+b" in content
+    assert "median ratio vs original: 1.0020" in content and "real speedup" in content
     assert "attempt 0002" in content
     assert boxes[0].files[f"{HISTORY_DIR}/0001/patch.diff"] == DIFF.encode()
-    assert f"{HISTORY_DIR}/0001/result.json" in boxes[0].files
+    assert f"{HISTORY_DIR}/0001/measurement.json" in boxes[0].files
 
 
 def test_max_turns_cap_collects_the_diff_so_far(config: RunConfig) -> None:
@@ -209,14 +216,14 @@ def test_box_setup_failure_terminates_and_reports(config: RunConfig) -> None:
     assert model.requests == []
 
 
-def test_tree_mismatch_is_a_box_error(config: RunConfig) -> None:
+def test_wrong_head_is_a_box_error(config: RunConfig) -> None:
     def wrong_tree(box: FakeBox, role: str) -> None:
-        box.on("git checkout -q --detach", ok("other_tree\n"))
+        box.on("git checkout -q --detach", ok("deadbeef\n"))
 
     factory = FakeBoxFactory(prepare=wrong_tree)
     out = AgentLoopWorker(FakeChatModel(script=[]), factory, config).attempt(make_input(config))
     assert out.stop_reason == StopReason.BOX_ERROR
-    assert "does not match" in out.error
+    assert "not the base" in out.error
 
 
 def test_unknown_tool_is_answered_and_the_loop_continues(config: RunConfig) -> None:

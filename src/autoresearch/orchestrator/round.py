@@ -1,14 +1,15 @@
-"""One round: fan out the workers, judge every patch, stack what was accepted.
+"""One round: fan out the workers, measure every patch, append everything.
 
 The round is the unit of history. Every worker in it sees the same history and
-the same incumbent, and none sees another's patch until the round is over.
-The orchestrator is the only writer: attempts are written once, results once,
-and the incumbent advances by one commit per accepted patch.
+starts from the same base commit, and none sees another's patch until the round
+is over. The orchestrator is the only writer: attempts are written once and
+measurements once. Nothing is merged. Every patch, including one that fails
+tests or is slower, is measured in full and recorded, because it is context for
+the next worker.
 
-Stacking, when more than one patch is accepted in a round: the best median
-ratio goes in first. Each remaining accepted patch is re judged against the
-new incumbent on its own referee. One that no longer applies or no longer
-clears the threshold is recorded as superseded.
+The only attempt the referee does not see is one with no patch. A patch whose
+normalised diff matches an earlier attempt is recorded as a duplicate of it and
+measured anyway, which gives a second sample of the same change.
 """
 
 from __future__ import annotations
@@ -19,27 +20,28 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
-from autoresearch import history, incumbent
+from autoresearch import history
 from autoresearch.boxes.protocol import BoxError
 from autoresearch.config import RunConfig
 from autoresearch.orchestrator.pool import RefereePool
 from autoresearch.patch import normalised_hash
 from autoresearch.types import (
     AttemptRef,
-    RefereeResult,
+    Measurement,
     RoundRecord,
     StopReason,
     Usage,
-    Verdict,
     WorkerOutput,
 )
 from autoresearch.worker.protocol import Worker, WorkerInput
+
+NO_PATCH = "no_patch"
 
 
 @dataclass(frozen=True)
 class RoundOutcome:
     record: RoundRecord
-    results: dict[int, RefereeResult]
+    measurements: dict[int, Measurement]
 
 
 def load_docs(paths: history.RunPaths) -> tuple[tuple[str, str], ...]:
@@ -48,23 +50,23 @@ def load_docs(paths: history.RunPaths) -> tuple[tuple[str, str], ...]:
     return tuple((p.name, p.read_text()) for p in sorted(paths.target.iterdir()) if p.is_file())
 
 
-def _judge_one(
-    slot: int, pool: RefereePool, incumbent_sha: str, patch: str
-) -> tuple[RefereeResult, str]:
-    """Judge on the slot's referee. A box failure rebuilds the box and retries once."""
+def _measure_one(
+    slot: int, pool: RefereePool, patch: str, noise_floor: float
+) -> tuple[Measurement, str]:
+    """Measure on the slot's referee. A box failure rebuilds the box and retries once."""
     for attempt in range(2):
         ref = pool.get(slot)
         try:
-            result = ref.judge(incumbent_sha, patch)
+            measurement = ref.measure(patch)
             if ref.broken:
                 pool.rebuild(slot)
-            return result, ""
+            return measurement, ""
         except BoxError as e:
             if attempt == 0:
                 pool.rebuild(slot)
                 continue
             return (
-                RefereeResult(Verdict.FAILED, f"box error: {e}", 0.0),
+                Measurement(noise_floor=noise_floor, errors=(f"box error: {e}",)),
                 f"referee {slot} failed twice: {e}",
             )
     raise AssertionError("unreachable")
@@ -77,12 +79,8 @@ def run_round(
     worker: Worker,
     pool: RefereePool,
 ) -> RoundOutcome:
-    t_round = time.perf_counter()
     target = config.target
-    inc = paths.incumbent
-    sha_before = incumbent.head_sha(inc)
-    tree_before = incumbent.tree_hash(inc)
-    stack_before = incumbent.cumulative_diff(inc, target.sha)
+    base_sha = target.sha
     past = history.load_history(paths)
     docs = load_docs(paths)
     first_number = history.next_attempt_number(paths)
@@ -91,9 +89,7 @@ def run_round(
     inputs = [
         WorkerInput(
             ref=AttemptRef(number=first_number + w, round=round_no, worker=w),
-            incumbent_sha=sha_before,
-            incumbent_tree=tree_before,
-            stack_diff=stack_before,
+            base_sha=base_sha,
             target=target,
             history=past,
             docs=docs,
@@ -108,11 +104,23 @@ def run_round(
         outputs: list[WorkerOutput] = list(ex.map(worker.attempt, inputs))
     worker_wall = time.perf_counter() - t0
 
-    for inp, out in zip(inputs, outputs, strict=True):
+    # 2. Record every attempt. Only an attempt with no patch skips the referee.
+    errors: list[str] = []
+    to_measure: dict[int, str] = {}
+    for w, (inp, out) in enumerate(zip(inputs, outputs, strict=True)):
+        if out.stop_reason in (StopReason.BOX_ERROR, StopReason.MODEL_ERROR):
+            errors.append(f"worker {w}: {out.stop_reason}: {out.error[:200]}")
+        patch = out.patch if out.patch and out.patch.strip() else None
+        duplicate_of = ""
+        if patch is not None:
+            h = normalised_hash(patch)
+            duplicate_of = seen_hashes.get(h, "")
+            seen_hashes.setdefault(h, inp.ref.dirname)
+            to_measure[w] = patch
         history.write_attempt(
             paths,
             inp.ref,
-            sha_before,
+            base_sha,
             {
                 "config_hash": config.config_hash,
                 "history_numbers": [a.ref.number for a in past],
@@ -120,94 +128,29 @@ def run_round(
             },
             out,
             out.transcript,
+            skipped="" if patch is not None else NO_PATCH,
+            duplicate_of=duplicate_of,
         )
 
-    # 2. Decide what needs a referee: no patch and duplicates are settled here.
-    results: dict[int, RefereeResult] = {}
-    to_judge: dict[int, str] = {}
-    errors: list[str] = []
-    for w, out in enumerate(outputs):
-        if out.stop_reason in (StopReason.BOX_ERROR, StopReason.MODEL_ERROR):
-            errors.append(f"worker {w}: {out.stop_reason}: {out.error[:200]}")
-        if not out.patch or not out.patch.strip():
-            results[w] = RefereeResult(
-                Verdict.NO_PATCH, f"worker stopped with {out.stop_reason}", config.referee.threshold
-            )
-            continue
-        h = normalised_hash(out.patch)
-        if h in seen_hashes:
-            results[w] = RefereeResult(
-                Verdict.DUPLICATE, f"same as attempt {seen_hashes[h]}", config.referee.threshold
-            )
-            continue
-        seen_hashes[h] = inputs[w].ref.dirname
-        to_judge[w] = out.patch
-
-    # 3. Referees, concurrently, one per slot.
+    # 3. Referees, concurrently, one per slot. Everything that applies is measured in full.
+    measurements: dict[int, Measurement] = {}
     t0 = time.perf_counter()
-    with ThreadPoolExecutor(max_workers=max(1, len(to_judge))) as ex:
+    with ThreadPoolExecutor(max_workers=max(1, len(to_measure))) as ex:
         futures = {
-            w: ex.submit(_judge_one, w, pool, sha_before, patch) for w, patch in to_judge.items()
+            w: ex.submit(_measure_one, w, pool, patch, config.referee.noise_floor)
+            for w, patch in to_measure.items()
         }
         for w, fut in futures.items():
-            result, err = fut.result()
-            results[w] = result
+            measurement, err = fut.result()
+            measurements[w] = measurement
             if err:
                 errors.append(err)
     referee_wall = time.perf_counter() - t0
 
-    # 4. Stack accepted patches into the incumbent, best first, re judging the rest.
-    accepted = sorted(
-        (w for w, r in results.items() if r.verdict == Verdict.ACCEPTED),
-        key=lambda w: results[w].median_ratio or 0.0,
-        reverse=True,
-    )
-    merged: list[int] = []
-    for w in accepted:
-        patch = outputs[w].patch or ""
-        if merged:
-            if not incumbent.applies_cleanly(inc, patch):
-                results[w] = RefereeResult(
-                    Verdict.SUPERSEDED,
-                    f"accepted at {results[w].median_ratio:.4f} but no longer applies after attempt "
-                    f"{inputs[merged[-1]].ref.dirname}",
-                    config.referee.threshold,
-                    pairs=results[w].pairs,
-                    median_ratio=results[w].median_ratio,
-                )
-                continue
-            pool.sync_slot(
-                w, target.sha, incumbent.cumulative_diff(inc, target.sha), incumbent.tree_hash(inc)
-            )
-            again, err = _judge_one(w, pool, incumbent.head_sha(inc), patch)
-            if err:
-                errors.append(err)
-            if again.verdict != Verdict.ACCEPTED:
-                results[w] = RefereeResult(
-                    Verdict.SUPERSEDED,
-                    f"accepted at {results[w].median_ratio:.4f} alone, {again.reason} on the new incumbent",
-                    config.referee.threshold,
-                    pairs=again.pairs,
-                    median_ratio=again.median_ratio,
-                    ir=again.ir,
-                    tests=again.tests,
-                )
-                continue
-            results[w] = again
-        incumbent.apply_and_commit(
-            inc, patch, f"attempt {inputs[w].ref.dirname}: {results[w].reason}"
-        )
-        merged.append(w)
-
-    for w, inp in enumerate(inputs):
-        history.write_result(paths, inp.ref, results[w])
-
-    # 5. Every referee to the new incumbent, ready for the next round.
-    sha_after = incumbent.head_sha(inc)
-    if merged:
-        pool.sync_all(
-            target.sha, incumbent.cumulative_diff(inc, target.sha), incumbent.tree_hash(inc)
-        )
+    # 4. Write measurements once, then the round record with best so far.
+    for w, m in measurements.items():
+        history.write_measurement(paths, inputs[w].ref, m)
+    best, _ = history.best_ratio(history.load_history(paths))
 
     usage = Usage()
     for out in outputs:
@@ -215,9 +158,12 @@ def run_round(
     record = RoundRecord(
         round=round_no,
         attempt_numbers=tuple(i.ref.number for i in inputs),
-        incumbent_sha_before=sha_before,
-        incumbent_sha_after=sha_after,
-        accepted_numbers=tuple(inputs[w].ref.number for w in merged),
+        base_sha=base_sha,
+        measured_numbers=tuple(inputs[w].ref.number for w in sorted(measurements)),
+        clears_noise_numbers=tuple(
+            inputs[w].ref.number for w in sorted(measurements) if measurements[w].clears_noise
+        ),
+        best_ratio_so_far=best,
         worker_wall_s=worker_wall,
         referee_wall_s=referee_wall,
         usage=usage,
@@ -225,23 +171,7 @@ def run_round(
         finished_at=dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
     )
     history.append_round(paths, record)
-    _ = time.perf_counter() - t_round
-    return RoundOutcome(record=record, results=results)
-
-
-def rebuild_incumbent(config: RunConfig, paths: history.RunPaths) -> str:
-    """Recreate incumbent/ from the pinned commit plus every accepted patch in order.
-
-    Used when a run directory arrives without its incumbent, for example after a
-    fetch, since the nested git repo is not part of the run's own history.
-    """
-    if paths.incumbent.exists():
-        return incumbent.head_sha(paths.incumbent)
-    incumbent.clone_at(config.target.repo, config.target.sha, paths.incumbent)
-    for a in history.load_history(paths):
-        if a.verdict == Verdict.ACCEPTED and a.patch:
-            incumbent.apply_and_commit(paths.incumbent, a.patch, f"attempt {a.ref.dirname}")
-    return incumbent.head_sha(paths.incumbent)
+    return RoundOutcome(record=record, measurements=measurements)
 
 
 def profile_docs_from_repo(root: Path, config: RunConfig) -> tuple[tuple[str, str], ...]:

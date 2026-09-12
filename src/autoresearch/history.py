@@ -4,15 +4,17 @@ Layout, relative to the run directory:
 
     config.toml           frozen copy of the run config
     target/               files the worker is shown about the target
-    incumbent/            git repo, one commit per accepted patch
     attempts/NNNN/        one directory per attempt, written once
     rounds.jsonl          one record per completed round
     boxes.json            live box ids, rewritten on change
     LOCK                  owner of the running orchestrator
 
 An attempt directory is written by ``write_attempt`` and never modified, except
-that ``write_result`` adds ``result.json`` once the referee has judged it.
+that ``write_measurement`` adds ``measurement.json`` once the referee has run.
 ``load_history`` is the one read path the worker's view goes through.
+
+There is no incumbent. Every attempt starts from, and is measured against, the
+run's base commit, which is the target's pinned sha and never changes.
 """
 
 from __future__ import annotations
@@ -27,8 +29,8 @@ from typing import Any
 from autoresearch.types import (
     Attempt,
     AttemptRef,
+    Measurement,
     Prediction,
-    RefereeResult,
     RoundRecord,
     StopReason,
     Usage,
@@ -37,7 +39,6 @@ from autoresearch.types import (
 
 CONFIG_FILE = "config.toml"
 TARGET_DIR = "target"
-INCUMBENT_DIR = "incumbent"
 ATTEMPTS_DIR = "attempts"
 ROUNDS_FILE = "rounds.jsonl"
 BOXES_FILE = "boxes.json"
@@ -48,7 +49,7 @@ OUTPUT_JSON = "output.json"
 PATCH_DIFF = "patch.diff"
 PREDICTION_JSON = "prediction.json"
 RATIONALE_MD = "rationale.md"
-RESULT_JSON = "result.json"
+MEASUREMENT_JSON = "measurement.json"
 TRANSCRIPT_JSONL = "transcript.jsonl"
 USAGE_JSON = "usage.json"
 
@@ -68,10 +69,6 @@ class RunPaths:
     @property
     def target(self) -> Path:
         return self.root / TARGET_DIR
-
-    @property
-    def incumbent(self) -> Path:
-        return self.root / INCUMBENT_DIR
 
     @property
     def attempts(self) -> Path:
@@ -104,18 +101,33 @@ def _read_json(path: Path) -> Any:
 def write_attempt(
     paths: RunPaths,
     ref: AttemptRef,
-    incumbent_sha: str,
+    base_sha: str,
     input_extra: dict[str, Any],
     output: WorkerOutput,
     transcript: str,
+    *,
+    skipped: str = "",
+    duplicate_of: str = "",
 ) -> Path:
-    """Create the attempt directory. Refuses to overwrite: attempts are write once."""
+    """Create the attempt directory. Refuses to overwrite: attempts are write once.
+
+    ``skipped`` records why the referee will not run, which is only ever that
+    there was no patch. ``duplicate_of`` names an earlier attempt with the same
+    normalised diff; the referee runs anyway.
+    """
     d = paths.attempt(ref)
     if d.exists():
         raise HistoryError(f"attempt directory already exists: {d}")
     d.mkdir(parents=True)
     _write_json(
-        d / INPUT_JSON, {"ref": ref.to_dict(), "incumbent_sha": incumbent_sha, **input_extra}
+        d / INPUT_JSON,
+        {
+            "ref": ref.to_dict(),
+            "base_sha": base_sha,
+            "skipped": skipped,
+            "duplicate_of": duplicate_of,
+            **input_extra,
+        },
     )
     _write_json(d / OUTPUT_JSON, output.to_dict())
     _write_json(d / USAGE_JSON, output.usage.to_dict())
@@ -128,31 +140,37 @@ def write_attempt(
     return d
 
 
-def write_result(paths: RunPaths, ref: AttemptRef, result: RefereeResult) -> None:
+def write_measurement(paths: RunPaths, ref: AttemptRef, measurement: Measurement) -> None:
     d = paths.attempt(ref)
-    target = d / RESULT_JSON
+    target = d / MEASUREMENT_JSON
     if target.exists():
-        raise HistoryError(f"result already written: {target}")
-    _write_json(target, result.to_dict())
+        raise HistoryError(f"measurement already written: {target}")
+    _write_json(target, measurement.to_dict())
 
 
 def read_attempt(d: Path) -> Attempt:
-    """Read one attempt directory. The referee's result is included when present."""
+    """Read one attempt directory. The measurement is included when present."""
     inp = _read_json(d / INPUT_JSON)
     out = _read_json(d / OUTPUT_JSON)
     patch_path = d / PATCH_DIFF
     pred_path = d / PREDICTION_JSON
-    result_path = d / RESULT_JSON
+    measurement_path = d / MEASUREMENT_JSON
     return Attempt(
         ref=AttemptRef.from_dict(inp["ref"]),
-        incumbent_sha=str(inp["incumbent_sha"]),
+        base_sha=str(inp["base_sha"]),
         patch=patch_path.read_text() if patch_path.exists() else None,
         prediction=Prediction.from_dict(_read_json(pred_path)) if pred_path.exists() else None,
         rationale=(d / RATIONALE_MD).read_text() if (d / RATIONALE_MD).exists() else "",
         stop_reason=StopReason(out["stop_reason"]),
         usage=Usage.from_dict(out.get("usage", {})),
         wall_s=float(out.get("wall_s", 0.0)),
-        result=RefereeResult.from_dict(_read_json(result_path)) if result_path.exists() else None,
+        measurement=(
+            Measurement.from_dict(_read_json(measurement_path))
+            if measurement_path.exists()
+            else None
+        ),
+        skipped=str(inp.get("skipped", "")),
+        duplicate_of=str(inp.get("duplicate_of", "")),
     )
 
 
@@ -167,6 +185,19 @@ def load_history(paths: RunPaths) -> tuple[Attempt, ...]:
 def next_attempt_number(paths: RunPaths) -> int:
     history = load_history(paths)
     return 1 if not history else history[-1].ref.number + 1
+
+
+def best_ratio(history: tuple[Attempt, ...]) -> tuple[float | None, int | None]:
+    """The best median ratio among attempts that clear the noise floor, and which attempt."""
+    best: float | None = None
+    which: int | None = None
+    for a in history:
+        if a.measurement is None or not a.measurement.clears_noise:
+            continue
+        ratio = a.measurement.median_ratio
+        if ratio is not None and (best is None or ratio > best):
+            best, which = ratio, a.ref.number
+    return best, which
 
 
 def append_round(paths: RunPaths, record: RoundRecord) -> None:

@@ -1,7 +1,7 @@
 """Command line entry point.
 
 Local commands, which never touch Sail: ``status``.
-Commands that create boxes or call the model: ``run``, ``judge``.
+Commands that create boxes or call the model: ``run``, ``measure``.
 Control box commands: ``deploy``, ``launch``, ``remote-status``, ``fetch``.
 
 Every command is a function taking parsed arguments, so the wiring is testable
@@ -68,17 +68,17 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_judge(args: argparse.Namespace) -> int:
-    """Phase 2b check 1: judge hand written patches on one real referee box."""
+def cmd_measure(args: argparse.Namespace) -> int:
+    """Phase 2b check 1: measure hand written patches on one real referee box."""
     from autoresearch.boxes.sail_box import SailBoxFactory
     from autoresearch.referee.referee import Referee
 
     cfg = _load(args.config)
     boxes = SailBoxFactory(cfg)
     ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    box = boxes.create(name=f"judge-{ts}", role="referee")
+    box = boxes.create(name=f"measure-{ts}", role="referee")
     print(f"referee box {box.name} ({box.box_id})", flush=True)
-    out_dir = Path(args.out) / "judge"
+    out_dir = Path(args.out) / "measure"
     out_dir.mkdir(parents=True, exist_ok=True)
     report: list[dict[str, object]] = []
     try:
@@ -86,14 +86,17 @@ def cmd_judge(args: argparse.Namespace) -> int:
         ref.setup()
         for patch_path in args.patches:
             patch = Path(patch_path).read_text()
-            print(f"judging {patch_path} ...", flush=True)
-            result = ref.judge(cfg.target.sha, patch)
-            entry = {"patch": patch_path, "result": result.to_dict()}
-            report.append(entry)
-            ir = "none" if result.ir is None else f"{result.ir.delta_pct:+.2f} pct"
+            print(f"measuring {patch_path} ...", flush=True)
+            m = ref.measure(patch)
+            report.append({"patch": patch_path, "measurement": m.to_dict()})
+            ir = "none" if m.ir is None else f"{m.ir.delta_pct:+.2f} pct"
+            tests = (
+                ", ".join(f"{t.scope} {'pass' if t.ok else 'FAIL'}" for t in m.tests) or "not run"
+            )
             print(
-                f"  {result.verdict}: {result.reason} "
-                f"(median {result.median_ratio}, ir {ir}, {result.wall_s:.0f}s)",
+                f"  applied {m.applied}; tests {tests}; result matches {m.result_matches}; "
+                f"median {m.median_ratio}; clears noise {m.clears_noise}; ir {ir}; "
+                f"errors {list(m.errors)}; {m.wall_s:.0f}s",
                 flush=True,
             )
             if ref.broken:
@@ -127,12 +130,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--until", type=int, default=None, help="stop after this round")
     p.set_defaults(func=cmd_run)
 
-    p = sub.add_parser("judge", help="judge patch files on one real referee box")
+    p = sub.add_parser("measure", help="measure patch files on one real referee box")
     p.add_argument("config")
     p.add_argument("patches", nargs="+")
     p.add_argument("--out", default="runs", help="where the report is written")
     p.add_argument("--keep", action="store_true", help="leave the box running")
-    p.set_defaults(func=cmd_judge)
+    p.set_defaults(func=cmd_measure)
 
     try:
         from autoresearch.control import commands as control

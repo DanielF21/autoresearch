@@ -1,6 +1,6 @@
 """The referee's timing arithmetic, all pure.
 
-A pair is one launch of the incumbent tree and one launch of the patched tree,
+A pair is one launch of the base tree and one launch of the patched tree,
 back to back, so machine drift affects both and cancels. Measurement C showed
 this is what keeps the median ratio centred on 1 when nothing changed.
 """
@@ -12,7 +12,7 @@ from dataclasses import dataclass
 
 from autoresearch.types import PairTiming
 
-INCUMBENT_FIRST = "incumbent_first"
+BASE_FIRST = "base_first"
 PATCHED_FIRST = "patched_first"
 
 
@@ -26,9 +26,9 @@ class PairPlan:
 
     @property
     def sequence(self) -> tuple[str, str]:
-        if self.order == INCUMBENT_FIRST:
-            return ("incumbent", "patched")
-        return ("patched", "incumbent")
+        if self.order == BASE_FIRST:
+            return ("base", "patched")
+        return ("patched", "base")
 
 
 def plan_pairs(n: int, hash_seeds: tuple[int, ...]) -> tuple[PairPlan, ...]:
@@ -44,7 +44,7 @@ def plan_pairs(n: int, hash_seeds: tuple[int, ...]) -> tuple[PairPlan, ...]:
     return tuple(
         PairPlan(
             index=i,
-            order=INCUMBENT_FIRST if i % 2 == 0 else PATCHED_FIRST,
+            order=BASE_FIRST if i % 2 == 0 else PATCHED_FIRST,
             hash_seed=hash_seeds[i % len(hash_seeds)],
         )
         for i in range(n)
@@ -56,7 +56,7 @@ def clean_pairs(pairs: tuple[PairTiming, ...]) -> tuple[PairTiming, ...]:
 
 
 def median_ratio(pairs: tuple[PairTiming, ...]) -> float | None:
-    """Median of incumbent over patched across clean pairs. None if no clean pair."""
+    """Median of base over patched across clean pairs. None if no clean pair."""
     clean = clean_pairs(pairs)
     if not clean:
         return None
@@ -67,6 +67,6 @@ def enough_clean(pairs: tuple[PairTiming, ...], minimum: int) -> bool:
     return len(clean_pairs(pairs)) >= minimum
 
 
-def is_speedup(median: float | None, threshold: float) -> bool:
-    """The acceptance rule: the median ratio must reach the threshold."""
-    return median is not None and median >= threshold
+def clears_noise(median: float | None, noise_floor: float) -> bool:
+    """The label for a real speedup: the median ratio reached the noise floor."""
+    return median is not None and median >= noise_floor

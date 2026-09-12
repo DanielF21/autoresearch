@@ -31,7 +31,8 @@ turn_timeout = 600            # Sail's default per request
 
 [referee]
 pairs = 6
-threshold = 1.0106            # measurement C, 6 pairs, 1 in 100 false alarms; checked by tests/test_thresholds.py
+noise_floor = 1.0106          # measurement C, 6 pairs, 1 in 100 false alarms; checked by tests/test_thresholds.py
+                              # a label, not a gate: every patch is measured and recorded regardless
 repeats_per_launch = 7
 min_clean_pairs = 4
 hash_seeds = [0, 1, 2, 3, 4]

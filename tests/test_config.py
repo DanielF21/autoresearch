@@ -13,7 +13,7 @@ def test_pilot_config_loads() -> None:
     assert cfg.width == 1
     assert cfg.rounds == 32
     assert cfg.referee.pairs == 6
-    assert cfg.referee.threshold == 1.0106
+    assert cfg.referee.noise_floor == 1.0106
     assert cfg.referee.min_clean_pairs == 4
     assert cfg.worker.model.startswith("deepseek/")
     assert cfg.run_dir == Path("/mnt/autoresearch/runs/t1_w1")
@@ -41,7 +41,7 @@ def _with(key_path: str, value: str) -> str:
     [
         ("run.width", "0", "at least 1"),
         ("run.rounds", "true", "at least 1"),
-        ("referee.threshold", "0.99", "above 1.0"),
+        ("referee.noise_floor", "0.99", "above 1.0"),
         ("referee.min_clean_pairs", "9", "between 1 and pairs"),
         ("boxes.worker_size", '"xl"', "must be one of"),
         ("target.allow", '"networkx/**"', "list of strings"),

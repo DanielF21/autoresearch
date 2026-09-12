@@ -1,15 +1,21 @@
-"""The referee: one patch in, one verdict out, on one dedicated box.
+"""The referee: one patch in, one measurement out, on one dedicated box.
 
-The box holds the target repository at ``REPO_DIR`` and the guest programs at
-``GUEST_DIR``. ``sync_incumbent`` brings the box's copy of the incumbent up to
-date with the orchestrator's, checked by tree hash. ``judge`` then does, in
-order: scope check, worktrees, module tests, full tests, result check, canary,
-timing pairs, instruction counts, verdict, cleanup.
+The box holds the target repository at ``REPO_DIR``, checked out at the run's
+base commit, and the guest programs at ``GUEST_DIR``. ``measure`` establishes
+every fact it can about a patch against that base, in order: scope, apply,
+module tests, full suite, one verify call of the benchmark on each tree, the
+canary, six timing pairs, instruction counts, cleanup.
+
+Nothing stops early. A step that fails records its failure in ``errors`` and the
+next step still runs, with one exception: if the patched tree cannot complete a
+single verify call, timing and instruction counts are skipped, because a patch
+that hangs or crashes would otherwise cost up to two hours of timeouts. The
+tests run regardless.
 
 Every step that runs in the box goes through a guest program that prints one
 JSON line, so the referee never parses free text. Anything that goes wrong at
 the box level raises BoxError to the orchestrator, which owns the box's life.
-Anything that goes wrong with the patch is a verdict, not an exception.
+Anything that goes wrong with the patch is a fact in the measurement.
 """
 
 from __future__ import annotations
@@ -28,11 +34,10 @@ from autoresearch.patch import changed_files, scope_violations
 from autoresearch.referee import timing
 from autoresearch.types import (
     IrCounts,
+    Measurement,
     PairTiming,
     Provenance,
-    RefereeResult,
     SuiteResult,
-    Verdict,
 )
 
 GUEST_SOURCE = Path(__file__).parent.parent / "guest"
@@ -43,10 +48,9 @@ LAUNCH_TIMEOUT = 600
 IR_TIMEOUT = 1800
 SETUP_TIMEOUT = 300
 
-INCUMBENT_TREE = f"{WORK_DIR}/incumbent"
+BASE_TREE = f"{WORK_DIR}/base"
 PATCHED_TREE = f"{WORK_DIR}/patched"
 PATCH_FILE = f"{WORK_DIR}/attempt.diff"
-STACK_FILE = f"{WORK_DIR}/incumbent.diff"
 
 
 class GuestError(RuntimeError):
@@ -69,11 +73,47 @@ def guest_command(script: str, *args: str, pin: int | None = None) -> str:
     return f"cd {GUEST_DIR} && {prefix}python3 {script} {quoted}"
 
 
+class _Facts:
+    """The measurement under construction. Mutable only inside ``measure``."""
+
+    def __init__(self, noise_floor: float, box_id: str) -> None:
+        self.noise_floor = noise_floor
+        self.box_id = box_id
+        self.applied = False
+        self.apply_error = ""
+        self.scope: tuple[str, ...] = ()
+        self.tests: list[SuiteResult] = []
+        self.base_fp = ""
+        self.patched_fp = ""
+        self.canary: float | None = None
+        self.pairs: tuple[PairTiming, ...] = ()
+        self.median: float | None = None
+        self.ir: IrCounts | None = None
+        self.errors: list[str] = []
+
+    def finish(self, wall_s: float) -> Measurement:
+        return Measurement(
+            noise_floor=self.noise_floor,
+            applied=self.applied,
+            apply_error=self.apply_error,
+            scope_violations=self.scope,
+            tests=tuple(self.tests),
+            base_fp=self.base_fp,
+            patched_fp=self.patched_fp,
+            canary_s=self.canary,
+            pairs=self.pairs,
+            median_ratio=self.median,
+            ir=self.ir,
+            errors=tuple(self.errors),
+            provenance=Provenance(box_id=self.box_id),
+            wall_s=wall_s,
+        )
+
+
 class Referee:
     def __init__(self, box: Box, config: RunConfig) -> None:
         self._box = box
         self._config = config
-        self._box_head = ""
         self._broken = ""
 
     @property
@@ -85,125 +125,110 @@ class Referee:
         """Non empty when cleanup failed and the box should be rebuilt before reuse."""
         return self._broken
 
-    # ----- setup and incumbent sync -------------------------------------------------
+    # ----- setup ---------------------------------------------------------------------
 
     def setup(self) -> None:
-        """Upload guest programs and confirm the repo is where the image put it."""
+        """Upload guest programs and confirm the repo is at the run's base commit."""
         self._box.upload_dir(GUEST_SOURCE, GUEST_DIR)
+        base = self._config.target.sha
         r = self._box.run(
-            f"mkdir -p {WORK_DIR} && cd {REPO_DIR} && git rev-parse HEAD", timeout=SETUP_TIMEOUT
-        )
-        if not r.ok:
-            raise BoxError(f"referee box has no repo at {REPO_DIR}: {r.stderr[-500:]}")
-        self._box_head = r.stdout.strip()
-
-    def sync_incumbent(self, base_sha: str, stack_diff: str, expected_tree: str) -> str:
-        """Make the box's repo match the orchestrator's incumbent. Returns the box's head.
-
-        The box replays the accepted patches as one diff on top of the pinned
-        commit, then its tree hash must equal the orchestrator's. Commit ids
-        differ between the two, tree hashes do not.
-        """
-        self._box.write(STACK_FILE, stack_diff.encode())
-        apply = (
-            f"git apply --index {STACK_FILE} && git commit -q -m incumbent"
-            if stack_diff.strip()
-            else "true"
-        )
-        r = self._box.run(
-            f"cd {REPO_DIR} && git checkout -q --detach {base_sha} && {apply}"
-            f" && git rev-parse HEAD && git rev-parse 'HEAD^{{tree}}'",
+            f"mkdir -p {WORK_DIR} && cd {REPO_DIR} && git checkout -q --detach {base}"
+            " && git rev-parse HEAD",
             timeout=SETUP_TIMEOUT,
         )
         if not r.ok:
-            raise BoxError(f"incumbent sync failed: {r.stderr[-500:]}")
-        lines = r.stdout.split()
-        head, tree = lines[-2], lines[-1]
-        if tree != expected_tree:
-            raise BoxError(f"incumbent tree mismatch: box {tree} vs orchestrator {expected_tree}")
-        self._box_head = head
-        return head
+            raise BoxError(f"referee box has no repo at {REPO_DIR}: {r.stderr[-500:]}")
+        head = r.stdout.strip().splitlines()[-1] if r.stdout.strip() else ""
+        if head != base:
+            raise BoxError(f"referee box is at {head}, not the base {base}")
 
-    # ----- judging -------------------------------------------------------------------
+    # ----- measuring -----------------------------------------------------------------
 
-    def judge(self, incumbent_sha: str, patch: str) -> RefereeResult:
+    def measure(self, patch: str) -> Measurement:
         t0 = time.perf_counter()
         cfg = self._config
         target = cfg.target
-        tests: list[SuiteResult] = []
-
-        def done(verdict: Verdict, reason: str, **extra: Any) -> RefereeResult:
-            return RefereeResult(
-                verdict=verdict,
-                reason=reason,
-                threshold=cfg.referee.threshold,
-                tests=tuple(tests),
-                provenance=Provenance(box_id=self._box.box_id),
-                wall_s=time.perf_counter() - t0,
-                **extra,
-            )
+        facts = _Facts(cfg.referee.noise_floor, self._box.box_id)
 
         files = changed_files(patch)
+        facts.scope = tuple(
+            f"{v.path}: {v.reason}" for v in scope_violations(files, target.allow, target.deny)
+        )
         if not files:
-            return done(Verdict.REJECTED_APPLY, "diff touches no files")
-        violations = scope_violations(files, target.allow, target.deny)
-        if violations:
-            detail = "; ".join(f"{v.path}: {v.reason}" for v in violations)
-            return done(Verdict.REJECTED_SCOPE, detail)
+            facts.apply_error = "diff touches no files"
+            return facts.finish(time.perf_counter() - t0)
 
         try:
             self._box.write(PATCH_FILE, patch.encode())
-            base = self._box_head or incumbent_sha
-            self._worktree(INCUMBENT_TREE, base, patch_file=None)
-            applied = self._worktree(PATCHED_TREE, base, patch_file=PATCH_FILE)
-            if not applied.get("ok"):
-                return done(Verdict.REJECTED_APPLY, str(applied.get("error", ""))[:500])
+            self._worktree(BASE_TREE, target.sha, patch_file=None)
+            applied = self._worktree(PATCHED_TREE, target.sha, patch_file=PATCH_FILE)
+            facts.applied = bool(applied.get("ok"))
+            if not facts.applied:
+                facts.apply_error = str(applied.get("error", ""))[:500]
+                return facts.finish(time.perf_counter() - t0)
 
-            module = self._tests(PATCHED_TREE, target.test_file, "module", workers=1)
-            tests.append(module)
-            if not module.ok:
-                return done(
-                    Verdict.REJECTED_TESTS_MODULE, f"{module.failed} failed, {module.errors} errors"
+            self._step(
+                facts,
+                "module tests",
+                lambda: facts.tests.append(
+                    self._tests(PATCHED_TREE, target.test_file, "module", workers=1)
+                ),
+            )
+            self._step(
+                facts,
+                "full tests",
+                lambda: facts.tests.append(
+                    self._tests(PATCHED_TREE, target.hot_file.split("/")[0], "full", workers=4)
+                ),
+            )
+
+            self._step(
+                facts, "verify base", lambda: setattr(facts, "base_fp", self._verify(BASE_TREE))
+            )
+            patched_ok = self._step(
+                facts,
+                "verify patched",
+                lambda: setattr(facts, "patched_fp", self._verify(PATCHED_TREE)),
+            )
+            if not patched_ok:
+                facts.errors.append(
+                    "timing and instruction counts skipped: patched tree cannot run"
                 )
-            full = self._tests(PATCHED_TREE, target.hot_file.split("/")[0], "full", workers=4)
-            tests.append(full)
-            if not full.ok:
-                return done(
-                    Verdict.REJECTED_TESTS_FULL, f"{full.failed} failed, {full.errors} errors"
-                )
+                return facts.finish(time.perf_counter() - t0)
 
-            fp_inc = self._verify(INCUMBENT_TREE)
-            fp_pat = self._verify(PATCHED_TREE)
-            if fp_inc != fp_pat:
-                return done(Verdict.FAILED, f"benchmark result differs: {fp_inc} vs {fp_pat}")
+            self._step(facts, "canary", lambda: setattr(facts, "canary", self._canary()))
 
-            canary = self._canary()
-            pairs = self._time_pairs()
-            if not timing.enough_clean(pairs, cfg.referee.min_clean_pairs):
+            def time_it() -> None:
                 pairs = self._time_pairs()
-            if not timing.enough_clean(pairs, cfg.referee.min_clean_pairs):
-                return done(
-                    Verdict.UNMEASURABLE,
-                    f"only {len(timing.clean_pairs(pairs))} clean pairs of {cfg.referee.pairs} after a retry",
-                    pairs=pairs,
-                    canary_s=canary,
-                )
+                if not timing.enough_clean(pairs, cfg.referee.min_clean_pairs):
+                    pairs = self._time_pairs()
+                facts.pairs = pairs
+                if not timing.enough_clean(pairs, cfg.referee.min_clean_pairs):
+                    facts.errors.append(
+                        f"only {len(timing.clean_pairs(pairs))} clean pairs of "
+                        f"{cfg.referee.pairs} after a retry; median not computed"
+                    )
+                    return
+                facts.median = timing.median_ratio(pairs)
 
-            median = timing.median_ratio(pairs)
-            ir = self._instruction_counts()
-            if timing.is_speedup(median, cfg.referee.threshold):
-                verdict, reason = (
-                    Verdict.ACCEPTED,
-                    f"median {median:.4f} >= {cfg.referee.threshold}",
-                )
-            else:
-                verdict, reason = (
-                    Verdict.REJECTED_BELOW_THRESHOLD,
-                    f"median {median:.4f} < {cfg.referee.threshold}",
-                )
-            return done(verdict, reason, pairs=pairs, median_ratio=median, ir=ir, canary_s=canary)
+            self._step(facts, "timing", time_it)
+            self._step(
+                facts,
+                "instruction counts",
+                lambda: setattr(facts, "ir", self._instruction_counts()),
+            )
+            return facts.finish(time.perf_counter() - t0)
         finally:
             self._cleanup()
+
+    def _step(self, facts: _Facts, name: str, run: Any) -> bool:
+        """Run one step. A guest failure is a recorded fact; a box failure propagates."""
+        try:
+            run()
+            return True
+        except GuestError as e:
+            facts.errors.append(f"{name}: {e}")
+            return False
 
     # ----- guest calls ---------------------------------------------------------------
 
@@ -218,7 +243,10 @@ class Referee:
         r = self._box.run(guest_command(script, *args, pin=pin), timeout=timeout, env=env)
         line = r.last_json_line()
         if line is None:
-            raise GuestError(f"{script} printed no JSON (rc {r.exit_code}): {r.stderr[-800:]}")
+            raise GuestError(
+                f"{script} printed no JSON (rc {r.exit_code}"
+                f"{', timed out' if r.timed_out else ''}): {r.stderr[-800:]}"
+            )
         return GuestRecord(json.loads(line), r)
 
     def _worktree(self, path: str, commit: str, patch_file: str | None) -> GuestRecord:
@@ -227,7 +255,7 @@ class Referee:
             args += ["--patch", patch_file]
         rec = self._guest("apply_patch.py", *args, timeout=SETUP_TIMEOUT)
         if patch_file is None and not rec.get("ok"):
-            raise BoxError(f"could not create the incumbent worktree: {rec.get('error')}")
+            raise BoxError(f"could not create the base worktree: {rec.get('error')}")
         return rec
 
     def _tests(self, tree: str, target: str, scope: str, workers: int) -> SuiteResult:
@@ -266,9 +294,9 @@ class Referee:
             "time_target.py", *self._target_args(tree), "--verify", timeout=LAUNCH_TIMEOUT
         )
         if rec.get("error"):
-            raise BoxError(f"verify failed on {tree}: {rec.get('error')}")
+            raise GuestError(f"verify failed on {tree}: {rec.get('error')}")
         if not rec.get("hot_executed"):
-            raise BoxError(f"hot file did not execute on {tree}")
+            raise GuestError(f"hot file did not execute on {tree}")
         return str(rec.get("result_fp"))
 
     def _canary(self) -> float:
@@ -288,7 +316,7 @@ class Referee:
             pin=PIN_CORE,
         )
         if rec.get("error"):
-            raise BoxError(f"timing launch failed on {tree}: {rec.get('error')}")
+            raise GuestError(f"timing launch failed on {tree}: {rec.get('error')}")
         clean = rec.get("min_clean")
         reasons: list[str] = []
         for s in rec.get("samples", []):
@@ -305,7 +333,7 @@ class Referee:
             contaminated = False
             reasons: tuple[str, ...] = ()
             for which in plan.sequence:
-                tree = INCUMBENT_TREE if which == "incumbent" else PATCHED_TREE
+                tree = BASE_TREE if which == "base" else PATCHED_TREE
                 t, bad, why = self._launch(tree, plan.hash_seed)
                 times[which] = t
                 contaminated = contaminated or bad
@@ -315,7 +343,7 @@ class Referee:
                     index=plan.index,
                     order=plan.order,
                     hash_seed=plan.hash_seed,
-                    incumbent_s=times["incumbent"],
+                    base_s=times["base"],
                     patched_s=times["patched"],
                     contaminated=contaminated,
                     reasons=reasons,
@@ -331,22 +359,22 @@ class Referee:
             )
             ir = rec.get("ir")
             if ir is None:
-                return None
+                raise GuestError(f"cachegrind failed on {tree}: {str(rec.get('error', ''))[:300]}")
             counts[calls] = int(ir)
         return counts[2] - counts[1]
 
     def _instruction_counts(self) -> IrCounts | None:
-        inc = self._ir_body(INCUMBENT_TREE)
-        pat = self._ir_body(PATCHED_TREE)
-        if inc is None or pat is None or inc <= 0:
+        base = self._ir_body(BASE_TREE)
+        patched = self._ir_body(PATCHED_TREE)
+        if base is None or patched is None or base <= 0:
             return None
-        return IrCounts(incumbent=inc, patched=pat)
+        return IrCounts(base=base, patched=patched)
 
     def _cleanup(self) -> None:
         """Remove both worktrees. A failure marks the referee broken rather than
-        raising, so a verdict already reached is not lost; the orchestrator
+        raising, so a measurement already made is not lost; the orchestrator
         checks ``broken`` and rebuilds the box before the next attempt."""
-        for path in (INCUMBENT_TREE, PATCHED_TREE):
+        for path in (BASE_TREE, PATCHED_TREE):
             try:
                 r = self._box.run(
                     guest_command(

@@ -16,10 +16,11 @@ from autoresearch.types import Attempt, AttemptRef, WorkerOutput
 
 @dataclass(frozen=True)
 class WorkerInput:
+    """``base_sha`` is the run's base commit. It never changes; every attempt
+    starts from it and every earlier attempt in ``history`` was measured against it."""
+
     ref: AttemptRef
-    incumbent_sha: str
-    incumbent_tree: str
-    stack_diff: str
+    base_sha: str
     target: TargetSpec
     history: tuple[Attempt, ...]
     docs: tuple[tuple[str, str], ...]

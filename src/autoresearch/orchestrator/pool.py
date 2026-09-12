@@ -2,7 +2,8 @@
 
 Box ids are recorded in boxes.json so a restarted orchestrator can reattach
 instead of paying for new boxes. A box that fails at the platform level is
-terminated and rebuilt from the image, then brought to the current incumbent.
+terminated and rebuilt from the image. Every box sits at the run's base commit
+for the whole run; there is nothing to sync between rounds.
 """
 
 from __future__ import annotations
@@ -21,9 +22,6 @@ class RefereePool:
         self._paths = paths
         self._boxes = boxes
         self._referees: dict[int, Referee] = {}
-        # What each slot's box should be synced to: base sha, stack diff, tree hash.
-        # A slot mid re judge can be ahead of the others, so this is per slot.
-        self._targets: dict[int, tuple[str, str, str]] = {}
 
     def _key(self, slot: int) -> str:
         return f"referee:{slot}"
@@ -38,9 +36,6 @@ class RefereePool:
         box = self._boxes.create(name=f"referee-{self._config.run_id}-{slot}", role="referee")
         ref = Referee(box, self._config)
         ref.setup()
-        target = self._targets.get(slot)
-        if target is not None:
-            ref.sync_incumbent(*target)
         return ref
 
     def start(self) -> None:
@@ -73,22 +68,6 @@ class RefereePool:
         self._referees[slot] = ref
         self._record()
         return ref
-
-    def sync_slot(self, slot: int, base_sha: str, stack_diff: str, tree: str) -> None:
-        """Bring one referee to an incumbent. A box that cannot is rebuilt once."""
-        self._targets[slot] = (base_sha, stack_diff, tree)
-        ref = self._referees[slot]
-        try:
-            if ref.broken:
-                raise BoxError(ref.broken)
-            ref.sync_incumbent(base_sha, stack_diff, tree)
-        except BoxError:
-            self.rebuild(slot)
-
-    def sync_all(self, base_sha: str, stack_diff: str, tree: str) -> None:
-        """Bring every referee to the incumbent."""
-        for slot in list(self._referees):
-            self.sync_slot(slot, base_sha, stack_diff, tree)
 
     def terminate_all(self) -> None:
         errors: list[str] = []

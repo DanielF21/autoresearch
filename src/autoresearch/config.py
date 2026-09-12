@@ -64,7 +64,7 @@ class WorkerConfig:
 @dataclass(frozen=True)
 class RefereeConfig:
     pairs: int
-    threshold: float
+    noise_floor: float
     repeats_per_launch: int
     min_clean_pairs: int
     hash_seeds: tuple[int, ...]
@@ -164,9 +164,9 @@ def parse_config(text: str) -> RunConfig:
     boxes = _section(raw, "boxes")
     storage = _section(raw, "storage")
 
-    threshold = _require(referee, "referee", "threshold")
-    if not isinstance(threshold, int | float) or threshold <= 1.0:
-        raise ConfigError("[referee].threshold must be a number above 1.0")
+    noise_floor = _require(referee, "referee", "noise_floor")
+    if not isinstance(noise_floor, int | float) or noise_floor <= 1.0:
+        raise ConfigError("[referee].noise_floor must be a number above 1.0")
     pairs = _positive_int(referee, "referee", "pairs")
     min_clean = referee.get("min_clean_pairs", max(1, (2 * pairs) // 3))
     if not isinstance(min_clean, int) or min_clean < 1 or min_clean > pairs:
@@ -206,7 +206,7 @@ def parse_config(text: str) -> RunConfig:
         ),
         referee=RefereeConfig(
             pairs=pairs,
-            threshold=float(threshold),
+            noise_floor=float(noise_floor),
             repeats_per_launch=_positive_int(referee, "referee", "repeats_per_launch"),
             min_clean_pairs=min_clean,
             hash_seeds=tuple(seeds_raw),

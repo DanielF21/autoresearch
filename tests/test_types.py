@@ -1,27 +1,30 @@
 from autoresearch.types import (
     AttemptRef,
     IrCounts,
+    Measurement,
     PairTiming,
     Prediction,
     Provenance,
-    RefereeResult,
     RoundRecord,
     SuiteResult,
     Usage,
-    Verdict,
 )
 
 
-def _pair(i: int, inc: float, pat: float, contaminated: bool = False) -> PairTiming:
+def _pair(i: int, base: float, pat: float, contaminated: bool = False) -> PairTiming:
     return PairTiming(
         index=i,
-        order="incumbent_first",
+        order="base_first",
         hash_seed=i,
-        incumbent_s=inc,
+        base_s=base,
         patched_s=pat,
         contaminated=contaminated,
         reasons=("steal",) if contaminated else (),
     )
+
+
+def _suite(scope: str, ok: bool = True) -> SuiteResult:
+    return SuiteResult(scope, 10, 0 if ok else 1, 0, 1.5, ok)
 
 
 def test_attempt_ref_dirname_is_zero_padded() -> None:
@@ -35,34 +38,60 @@ def test_usage_adds_fieldwise() -> None:
     assert Usage.from_dict((a + b).to_dict()) == a + b
 
 
-def test_pair_ratio_is_incumbent_over_patched() -> None:
+def test_pair_ratio_is_base_over_patched() -> None:
     assert _pair(0, 2.0, 1.0).ratio == 2.0
 
 
 def test_ir_delta_pct() -> None:
-    assert IrCounts(incumbent=1000, patched=900).delta_pct == -10.0
+    assert IrCounts(base=1000, patched=900).delta_pct == -10.0
 
 
-def test_referee_result_round_trip() -> None:
-    result = RefereeResult(
-        verdict=Verdict.ACCEPTED,
-        reason="median 1.05 above 1.0106",
-        threshold=1.0106,
+def test_measurement_round_trip() -> None:
+    m = Measurement(
+        noise_floor=1.0106,
+        applied=True,
+        scope_violations=(),
+        tests=(_suite("module"), _suite("full")),
+        base_fp="a",
+        patched_fp="a",
+        canary_s=0.51,
         pairs=(_pair(0, 1.0, 0.95), _pair(1, 1.0, 0.96, contaminated=True)),
         median_ratio=1.0526,
         ir=IrCounts(100, 90),
-        tests=(SuiteResult("module", 10, 0, 0, 1.5, True),),
-        canary_s=0.51,
+        errors=("instruction counts: valgrind missing",),
         provenance=Provenance(box_id="sb_x", cpu_flag_hash="abc"),
         wall_s=200.0,
     )
-    back = RefereeResult.from_dict(result.to_dict())
-    assert back == result
+    assert Measurement.from_dict(m.to_dict()) == m
+    assert m.tests_pass and m.result_matches is True and m.clears_noise
 
 
-def test_referee_result_minimal_round_trip() -> None:
-    result = RefereeResult(verdict=Verdict.REJECTED_SCOPE, reason="edited a test", threshold=1.01)
-    assert RefereeResult.from_dict(result.to_dict()) == result
+def test_measurement_minimal_round_trip() -> None:
+    m = Measurement(noise_floor=1.01, apply_error="does not apply")
+    assert Measurement.from_dict(m.to_dict()) == m
+    assert not m.applied and not m.tests_pass and m.result_matches is None and not m.clears_noise
+
+
+def test_clears_noise_requires_every_condition() -> None:
+    good = Measurement(
+        noise_floor=1.0106,
+        applied=True,
+        tests=(_suite("module"), _suite("full")),
+        base_fp="a",
+        patched_fp="a",
+        median_ratio=1.02,
+    )
+    assert good.clears_noise
+    from dataclasses import replace
+
+    assert not replace(good, median_ratio=1.01).clears_noise
+    assert not replace(good, median_ratio=None).clears_noise
+    assert not replace(good, tests=(_suite("module"), _suite("full", ok=False))).clears_noise
+    assert not replace(good, tests=(_suite("module"),)).clears_noise  # full suite never ran
+    assert not replace(good, patched_fp="b").clears_noise
+    assert not replace(good, patched_fp="").clears_noise
+    assert not replace(good, scope_violations=("tests edited",)).clears_noise
+    assert not replace(good, applied=False).clears_noise
 
 
 def test_prediction_round_trip_with_and_without_confidence() -> None:
@@ -74,9 +103,10 @@ def test_round_record_round_trip() -> None:
     rec = RoundRecord(
         round=2,
         attempt_numbers=(3, 4),
-        incumbent_sha_before="a",
-        incumbent_sha_after="b",
-        accepted_numbers=(4,),
+        base_sha="a",
+        measured_numbers=(3, 4),
+        clears_noise_numbers=(4,),
+        best_ratio_so_far=1.07,
         worker_wall_s=100.0,
         referee_wall_s=200.0,
         usage=Usage(1, 2, 3, 4),
@@ -84,3 +114,5 @@ def test_round_record_round_trip() -> None:
         finished_at="2026-09-11T00:00:00Z",
     )
     assert RoundRecord.from_dict(rec.to_dict()) == rec
+    none = RoundRecord(1, (1,), "a", (), (), None, 0.0, 0.0, Usage(), (), "t")
+    assert RoundRecord.from_dict(none.to_dict()) == none

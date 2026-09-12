@@ -1,4 +1,4 @@
-"""The threshold in configs/t1_w1.toml is derived, not typed. These tests keep it so."""
+"""The noise floor in configs/t1_w1.toml is derived, not typed. These tests keep it so."""
 
 import json
 from pathlib import Path
@@ -8,8 +8,8 @@ import pytest
 from autoresearch.config import load_config
 from autoresearch.referee.thresholds import (
     PILOT_FALSE_ALARM,
+    PILOT_NOISE_FLOOR,
     PILOT_PAIRS,
-    PILOT_THRESHOLD,
     null_ratios_from_measure_c,
     null_threshold,
 )
@@ -35,15 +35,15 @@ def test_fixture_matches_raw_measurement_c() -> None:
     assert null_ratios_from_measure_c(RAW, "long") == _fixture_ratios()
 
 
-def test_pilot_threshold_is_reproduced_from_the_null_data() -> None:
+def test_pilot_noise_floor_is_reproduced_from_the_null_data() -> None:
     computed = null_threshold(_fixture_ratios(), PILOT_PAIRS, PILOT_FALSE_ALARM)
-    assert computed == pytest.approx(PILOT_THRESHOLD, abs=0.0003)
+    assert computed == pytest.approx(PILOT_NOISE_FLOOR, abs=0.0003)
 
 
-def test_config_threshold_equals_the_derived_constant() -> None:
+def test_config_noise_floor_equals_the_derived_constant() -> None:
     cfg = load_config(ROOT / "configs" / "t1_w1.toml")
     assert cfg.referee.pairs == PILOT_PAIRS
-    assert cfg.referee.threshold == PILOT_THRESHOLD
+    assert cfg.referee.noise_floor == PILOT_NOISE_FLOOR
 
 
 @pytest.mark.parametrize(
@@ -56,7 +56,7 @@ def test_reproduces_the_measurement_c_resolution_table(pairs: int, expected_pct:
     assert 100 * (t - 1) == pytest.approx(expected_pct, abs=0.02)
 
 
-def test_more_pairs_lower_the_threshold() -> None:
+def test_more_pairs_lower_the_floor() -> None:
     ratios = _fixture_ratios()
     t = [null_threshold(ratios, k, 0.05, resamples=5000) for k in (1, 3, 6, 12)]
     assert t == sorted(t, reverse=True)

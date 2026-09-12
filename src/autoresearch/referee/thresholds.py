@@ -1,12 +1,15 @@
-"""Where the acceptance threshold comes from.
+"""Where the noise floor comes from.
 
 Measurement C timed two copies of networkx that differed by a blank line, 48
 pairs on the large graph. Those 48 ratios are what a patch that changes nothing
-looks like. The threshold for k pairs at false alarm rate a is the (1 - a)
+looks like. The noise floor for k pairs at false alarm rate a is the (1 - a)
 quantile of the median of k ratios drawn from that null set. A patch whose
 median clears it has less than a chance of being noise.
 
-``PILOT_THRESHOLD`` is the value for 6 pairs at 1 in 100, and
+The floor is a label, not a gate. Every patch is measured and recorded in
+full; the floor only says which median ratios can be called real speedups.
+
+``PILOT_NOISE_FLOOR`` is the value for 6 pairs at 1 in 100, and
 ``tests/test_thresholds.py`` recomputes it from the raw JSONL so the number in
 the config is checked rather than typed.
 """
@@ -21,7 +24,7 @@ from pathlib import Path
 
 PILOT_PAIRS = 6
 PILOT_FALSE_ALARM = 0.01
-PILOT_THRESHOLD = 1.0106
+PILOT_NOISE_FLOOR = 1.0106
 
 
 def null_threshold(

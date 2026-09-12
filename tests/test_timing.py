@@ -1,10 +1,10 @@
 import pytest
 
 from autoresearch.referee.timing import (
-    INCUMBENT_FIRST,
+    BASE_FIRST,
     PATCHED_FIRST,
+    clears_noise,
     enough_clean,
-    is_speedup,
     median_ratio,
     plan_pairs,
 )
@@ -12,15 +12,15 @@ from autoresearch.types import PairTiming
 
 
 def _pair(i: int, ratio: float, contaminated: bool = False) -> PairTiming:
-    return PairTiming(i, INCUMBENT_FIRST, 0, ratio, 1.0, contaminated)
+    return PairTiming(i, BASE_FIRST, 0, ratio, 1.0, contaminated)
 
 
 def test_plan_alternates_order_and_rotates_seeds() -> None:
     plan = plan_pairs(6, (0, 1, 2, 3, 4))
-    assert [p.order for p in plan] == [INCUMBENT_FIRST, PATCHED_FIRST] * 3
+    assert [p.order for p in plan] == [BASE_FIRST, PATCHED_FIRST] * 3
     assert [p.hash_seed for p in plan] == [0, 1, 2, 3, 4, 0]
-    assert plan[0].sequence == ("incumbent", "patched")
-    assert plan[1].sequence == ("patched", "incumbent")
+    assert plan[0].sequence == ("base", "patched")
+    assert plan[1].sequence == ("patched", "base")
 
 
 def test_plan_rejects_bad_inputs() -> None:
@@ -46,7 +46,7 @@ def test_enough_clean() -> None:
     assert not enough_clean(pairs, 3)
 
 
-def test_is_speedup_at_threshold_is_inclusive() -> None:
-    assert is_speedup(1.0106, 1.0106)
-    assert not is_speedup(1.0105, 1.0106)
-    assert not is_speedup(None, 1.0106)
+def test_clears_noise_at_the_floor_is_inclusive() -> None:
+    assert clears_noise(1.0106, 1.0106)
+    assert not clears_noise(1.0105, 1.0106)
+    assert not clears_noise(None, 1.0106)

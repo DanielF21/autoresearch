@@ -1,10 +1,11 @@
 """The agent loop worker: a fresh box, a conversation with tools, one diff out.
 
-Per attempt: create a box from the image, bring its repo to the incumbent,
-make a pristine baseline worktree for the benchmark tool, upload the guest
-programs and the history, then loop: ask the model, run the tools it asks for,
-append the results, until it submits or a cap trips. The box is terminated on
-every exit path. The patch is ``git diff`` of the repo, never model text.
+Per attempt: create a box from the image, check its repo out at the run's base
+commit, make a second worktree of the same commit for the benchmark tool, upload
+the guest programs and the history, then loop: ask the model, run the tools it
+asks for, append the results, until it submits or a cap trips. The box is
+terminated on every exit path. The patch is ``git diff`` of the repo, never
+model text.
 
 Caps and kill rules, each recorded as the stop reason:
 - max_turns, max_seconds, max_input_tokens from the config
@@ -67,38 +68,33 @@ class AgentLoopWorker:
 
     def _prepare_box(self, box: Box, inp: WorkerInput) -> None:
         box.upload_dir(GUEST_SOURCE, GUEST_DIR)
-        box.write("/workspace/incumbent.diff", inp.stack_diff.encode())
-        apply = (
-            "git apply --index /workspace/incumbent.diff && git commit -q -m incumbent"
-            if inp.stack_diff.strip()
-            else "true"
-        )
-        # The orchestrator's incumbent commit ids do not exist in the box; the box
-        # starts from the pinned commit and replays the accepted stack, then the
-        # tree hash must match.
+        # The image cloned the repo at the base commit. Check it out explicitly and
+        # confirm HEAD, so a stale image or a wrong config cannot go unnoticed.
         r = box.run(
-            f"cd {REPO_DIR} && git checkout -q --detach {inp.target.sha} && {apply}"
-            f" && git rev-parse 'HEAD^{{tree}}'"
-            f" && rm -rf {tools.BASELINE_DIR} && git worktree prune"
-            f" && git worktree add -q --detach {tools.BASELINE_DIR} HEAD",
+            f"cd {REPO_DIR} && git checkout -q --detach {inp.base_sha}"
+            f" && git rev-parse HEAD"
+            f" && rm -rf {tools.BASE_DIR} && git worktree prune"
+            f" && git worktree add -q --detach {tools.BASE_DIR} HEAD",
             timeout=SETUP_TIMEOUT,
         )
         if not r.ok:
             raise BoxError(f"worker box setup failed: {r.stderr[-800:]}")
-        tree = r.stdout.split()[0] if r.stdout.split() else ""
-        if tree != inp.incumbent_tree:
-            raise BoxError(f"worker box tree {tree} does not match incumbent {inp.incumbent_tree}")
+        head = r.stdout.split()[0] if r.stdout.split() else ""
+        if head != inp.base_sha:
+            raise BoxError(f"worker box is at {head}, not the base {inp.base_sha}")
         for a in inp.history:
             d = f"{tools.HISTORY_DIR}/{a.ref.dirname}"
             box.write(f"{d}/summary.md", prompt.render_attempt(a).encode())
             if a.patch:
                 box.write(f"{d}/patch.diff", a.patch.encode())
-            if a.result is not None:
-                box.write(f"{d}/result.json", json.dumps(a.result.to_dict(), indent=1).encode())
+            if a.measurement is not None:
+                box.write(
+                    f"{d}/measurement.json", json.dumps(a.measurement.to_dict(), indent=1).encode()
+                )
 
     def _collect_patch(self, box: Box) -> str:
         r = box.run(
-            f"cd {REPO_DIR} && git add -N . && git diff --binary -- . ':(exclude){shlex.quote(tools.BASELINE_DIR)}'",
+            f"cd {REPO_DIR} && git add -N . && git diff --binary -- . ':(exclude){shlex.quote(tools.BASE_DIR)}'",
             timeout=120,
         )
         if not r.ok:
@@ -156,8 +152,8 @@ class AgentLoopWorker:
                 "role": "user",
                 "content": prompt.initial_user_message(
                     inp.target,
-                    inp.incumbent_sha,
-                    self._config.referee.threshold,
+                    inp.base_sha,
+                    self._config.referee.noise_floor,
                     inp.docs,
                     inp.history,
                     inp.ref.number,

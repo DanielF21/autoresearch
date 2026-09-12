@@ -1,0 +1,12 @@
+diff --git a/networkx/algorithms/cluster.py b/networkx/algorithms/cluster.py
+--- a/networkx/algorithms/cluster.py
++++ b/networkx/algorithms/cluster.py
+@@ -187,7 +187,7 @@ def _directed_triangles_and_degree_iter(G, nodes=None):
+                     (isuccs & jsuccs),
+                 )
+             )
+-        dtotal = len(ipreds) + len(isuccs)
++        dtotal = len(ipreds) + len(isuccs) + 1
+         dbidirectional = len(ipreds & isuccs)
+         yield (i, dtotal, dbidirectional, directed_triangles)
+

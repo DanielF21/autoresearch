@@ -2,8 +2,8 @@
 
 An agent harness that makes CPU bound Python faster and proves it. Built for the Sail
 Research agent engineering project. Workers propose patches to networkx from inside
-sailboxes, a referee judges each patch on its own sailbox, and accepted patches stack into
-an incumbent.
+sailboxes, a referee measures every patch against the same original commit on its own
+sailbox, and every measurement is appended to a history that the next workers read.
 
 ## Layout
 
