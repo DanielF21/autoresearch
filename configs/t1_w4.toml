@@ -1,0 +1,47 @@
+# Target 1, width 4. Identical to t1_w1.toml except run_id and width.
+# Every number is either a user decision or a Phase 1 measurement, noted inline.
+
+[run]
+run_id = "t1_w4"
+width = 4
+rounds = 32
+
+[target]
+name = "networkx_clustering_er1000_005"
+repo = "https://github.com/networkx/networkx"
+sha = "c94928ed94899033126c9d47f797a1f698584b20"
+hot_file = "networkx/algorithms/cluster.py"
+test_file = "networkx/algorithms/tests/test_cluster.py"
+graph = "nx.erdos_renyi_graph(1000, 0.05, seed=42, directed=True)"
+call = "nx.clustering(G)"
+allow = ["networkx/**"]
+deny = ["networkx/**/tests/**", "benchmarks/**"]
+# Shown to every worker. The profile only; artifacts/repo.md is left out because
+# it names a candidate patch, which would hand the agents their first move.
+docs = ["configs/docs/profile_long_flat.txt", "configs/docs/profile_long_callers.txt"]
+
+[worker]
+model = "deepseek/deepseek-v4-pro-0813"
+reasoning_effort = "high"
+completion_window = "asap"
+max_turns = 80
+max_seconds = 3600
+max_input_tokens = 8000000
+turn_timeout = 600            # Sail's default per request
+
+[referee]
+pairs = 6
+threshold = 1.0106            # measurement C, 6 pairs, 1 in 100 false alarms; checked by tests/test_thresholds.py
+repeats_per_launch = 7
+min_clean_pairs = 4
+hash_seeds = [0, 1, 2, 3, 4]
+
+[boxes]
+worker_size = "m"
+referee_size = "m"
+control_size = "s"
+disk_gib = 32
+
+[storage]
+volume = "autoresearch"
+mount = "/mnt/autoresearch"

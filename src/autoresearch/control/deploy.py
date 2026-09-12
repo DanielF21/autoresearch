@@ -101,18 +101,21 @@ def deploy(
     )
 
 
-def launch_command(config: RunConfig, config_path: str) -> str:
+def launch_command(config: RunConfig, config_path: str, until: int | None = None) -> str:
     """The detached command that runs one setting inside the control box."""
     log = f"{config.storage.mount}/runs/{config.run_id}.launch.log"
+    stop = f" --until {until}" if until is not None else ""
     return (
         f"cd {PACKAGE_DIR} && nohup autoresearch run {config_path} --repo-root {PACKAGE_DIR}"
-        f" >> {log} 2>&1 &"
+        f"{stop} >> {log} 2>&1 &"
     )
 
 
-def launch(config: RunConfig, config_path: str, box: Box, api_key: str) -> str:
+def launch(
+    config: RunConfig, config_path: str, box: Box, api_key: str, until: int | None = None
+) -> str:
     """Start the run. The key lives only in this process's environment."""
-    cmd = launch_command(config, config_path)
+    cmd = launch_command(config, config_path, until)
     box.start(cmd, env={"SAIL_API_KEY": api_key})
     return cmd
 

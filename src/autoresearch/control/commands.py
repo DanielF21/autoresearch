@@ -59,7 +59,7 @@ def _control_box(config_path: str) -> tuple[object, object]:
 
 def cmd_launch(args: argparse.Namespace) -> int:
     cfg, box = _control_box(args.config)
-    cmd = ctl.launch(cfg, args.config, box, _api_key())  # type: ignore[arg-type]
+    cmd = ctl.launch(cfg, args.config, box, _api_key(), args.until)  # type: ignore[arg-type]
     print(f"started in the control box: {cmd}")
     print("read progress with: autoresearch remote-status " + args.config)
     return 0
@@ -88,6 +88,7 @@ def register(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
 
     p = sub.add_parser("launch", help="start one setting's run inside the control box")
     p.add_argument("config", help="config path relative to the repo root, as uploaded")
+    p.add_argument("--until", type=int, default=None, help="stop after this round")
     p.set_defaults(func=cmd_launch)
 
     p = sub.add_parser("remote-status", help="status of a run, read from the control box")
