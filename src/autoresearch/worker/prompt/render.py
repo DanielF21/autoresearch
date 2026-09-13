@@ -1,72 +1,19 @@
-"""What the worker is told. Stable content first, so the prefix caches.
+"""The first user message and the per turn messages, rendered from the run.
 
-Order of the first user message: the target, the documents about it, then every
-earlier attempt in full. Each round only appends attempts, so the prefix of the
-next round's prompt is the whole of this one. The per attempt instruction comes
-last.
+The system prompt lives beside this module, one version per file (v1.py and on),
+and is picked per worker slot. Everything here is the same for every version:
+the target, the documents, the history index, the closing instruction, and the
+two messages the loop injects (the nudge and the last turn).
+
+Order of the first user message: the target, the documents about it, then the
+history index. Each round only appends attempts, so the prefix of the next
+round's prompt is the whole of this one. The per attempt instruction comes last.
 """
 
 from __future__ import annotations
 
 from autoresearch.config import BenchmarkInput, TargetSpec
 from autoresearch.types import Attempt
-
-_SYSTEM_PROMPT = """\
-You are a performance engineer working alone in a sandbox on one repository.
-Your job is to make one call faster with one patch, across every input it is
-measured on, without changing what the code computes, and to say before
-measurement how much faster you expect it to be.
-
-Your sandbox is a Debian container you are root in, with Python {python}, git,
-and the usual command line tools. The shell is how you look around and make changes.
-There is no file reading or editing tool; use the shell for both. The filesystem:
-
-  /workspace/repo      the repository, checked out at the original commit. This
-                       is your working tree and the only thing you change. The
-                       shell starts here.
-  /workspace/base      the same commit, untouched, and read only. The benchmark
-                       times your tree against it. Do not try to modify it.
-  /workspace/history   every earlier attempt, one directory per attempt named
-                       0001, 0002 and so on, each holding patch.diff, the full
-                       measurement.json, and rationale.md in that worker's words.
-                       The history table below is only an index of these.
-
-How this works:
-- Every attempt starts from the same original commit, and every attempt is
-  measured against that same original. There is no accumulating version. If an
-  earlier attempt found a gain you want to keep, include its diff in your own
-  patch; every earlier patch is on disk under /workspace/history/NNNN/patch.diff
-  and can be applied with git apply.
-- The referee measures every submission in full and records all of it: the
-  module's tests, the whole suite, whether the result is unchanged on every
-  input, and back to back timing pairs on every input against the original. How
-  many pairs, and on which inputs, is stated with the target below. A submission
-  that fails tests or is slower is still recorded, so the next worker learns
-  from it.
-- A real speedup passes both suites, computes the same result on every input,
-  is not slower on any input, and clears the noise floor on at least one. The
-  number recorded for it is the geometric mean across the inputs.
-- Only source files may change. A patch that edits tests or benchmarks is
-  measured but marked out of scope, and cannot count as a speedup.
-- Every earlier attempt is in your history with its measurements. Read it
-  before you start. Do not repeat a failed idea unless you can say what will be
-  different.
-- Work in small steps: look, change, run the module tests, run the benchmark,
-  and submit when you have something. An attempt that never submits is wasted.
-- run_benchmark times every input, so it is what tells you whether a change
-  helps everywhere or only where you were looking. Run it before you submit.
-- run_tests runs the hot module's own tests, which is the check worth making
-  while you work. You cannot run the whole suite and do not need to: the referee
-  runs it on every submission, and a submission that breaks it is recorded as
-  failing tests. Spend the time on the patch instead.
-- When you submit, the harness takes git diff of your working tree as the
-  patch. Nothing else you write counts.
-"""
-
-
-def system_prompt(python: str) -> str:
-    """The system message. ``python`` is the version the box reported, never assumed."""
-    return _SYSTEM_PROMPT.format(python=python)
 
 
 def _plural(n: int, noun: str) -> str:
@@ -89,12 +36,33 @@ def outcome(a: Attempt) -> str:
         return "tests failed"
     if m.result_matches is False:
         return "wrong result"
+    if m.untimed:
+        # Named, so the reader knows the geomean beside it covers fewer inputs.
+        return f"timing failed on {', '.join(m.untimed)}"
     if m.regressions:
         # Named, because which input a patch lost on is the whole lesson.
         return f"slower on {', '.join(m.regressions)}"
     if m.clears_noise:
         return "real speedup"
     return "below the noise floor"
+
+
+SUMMARY_CHARS = 70
+OUTCOME_CHARS = 28
+
+
+def mechanism_line(rationale: str, limit: int = SUMMARY_CHARS) -> str:
+    """The first non empty line of a rationale, cut to ``limit`` characters.
+
+    The prompt asks every worker to make that line one sentence naming the
+    mechanism, so the index becomes a map of what has been tried. A rationale
+    from before that rule, or none at all, shows as what it is.
+    """
+    for line in rationale.splitlines():
+        line = line.strip().lstrip("#-* ").strip()
+        if line:
+            return line if len(line) <= limit else line[: limit - 1].rstrip() + "…"
+    return "(no rationale)"
 
 
 def index_line(a: Attempt) -> str:
@@ -104,7 +72,10 @@ def index_line(a: Attempt) -> str:
     note = outcome(a)
     if a.duplicate_of:
         note += f", same diff as {a.duplicate_of}"
-    return f"{a.ref.dirname:<4}  {speed:>8}  {worst:>8}  {note}"
+    return (
+        f"{a.ref.dirname:<4}  {speed:>8}  {worst:>8}  {note:<{OUTCOME_CHARS}}  "
+        f"{mechanism_line(a.rationale)}"
+    )
 
 
 def render_history(history: tuple[Attempt, ...]) -> str:
@@ -113,7 +84,9 @@ def render_history(history: tuple[Attempt, ...]) -> str:
     The attempts are on disk in the box, and the agent reads the ones it cares
     about with the shell. Rendering every diff here instead would put the whole
     history in every turn of every attempt, which at width 16 is hundreds of
-    thousands of tokens per turn and buys nothing the filesystem does not.
+    thousands of tokens per turn and buys nothing the filesystem does not. The
+    last column is the one line every rationale opens with, so the whole table
+    is a survey of mechanisms, not a leaderboard.
     """
     if not history:
         return "## History\n\nNo earlier attempts. You are first.\n"
@@ -126,10 +99,11 @@ def render_history(history: tuple[Attempt, ...]) -> str:
         + ". Newest last.\n\n"
         "Each is a directory under /workspace/history holding patch.diff, "
         "measurement.json and rationale.md. The measurement holds every input's own "
-        "timing, which the two columns here only summarise. Read the ones worth reading "
-        "before you repeat an idea or build on one.\n\n"
+        "timing, which the two columns here only summarise. The last column is the "
+        "first line of that attempt's rationale. Survey the whole table before you "
+        "read any diff.\n\n"
         "```\n"
-        f"{'id':<4}  {'geomean':>8}  {'worst':>8}  outcome\n"
+        f"{'id':<4}  {'geomean':>8}  {'worst':>8}  {'outcome':<{OUTCOME_CHARS}}  mechanism\n"
     )
     return head + "\n".join(index_line(a) for a in history) + "\n```\n"
 
@@ -222,10 +196,16 @@ def initial_user_message(
         + "\n"
         + render_history(history)
         + "\n## This attempt\n\n"
-        f"You are attempt {attempt_number:04d}. Begin by reading the hot file and the history "
-        "with the shell, then make one change and submit."
+        f"You are attempt {attempt_number:04d}. Survey the history and the hot file, write "
+        "down what you expect before you measure, then make your change."
     )
 
+
+LAST_TURN = (
+    "This is your last turn. Call submit now with the rationale of the diff currently in "
+    "your working tree and the speedup you predicted for it. Any other tool call ends the "
+    "attempt with the diff and no rationale."
+)
 
 NUDGE = (
     "You replied without calling a tool. Use the shell to look at the code and change it, "

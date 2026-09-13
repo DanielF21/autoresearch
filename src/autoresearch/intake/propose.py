@@ -160,7 +160,7 @@ READ_TOOLS: dict[str, Callable[[Path, dict[str, Any]], str]] = {
     "grep": grep,
 }
 
-TOOL_SPECS: list[ToolSpec] = [
+READ_TOOL_SPECS: list[ToolSpec] = [
     _tool(
         "list_files",
         f"List files under a directory of the repository, with sizes. glob defaults to '*'; "
@@ -181,6 +181,10 @@ TOOL_SPECS: list[ToolSpec] = [
         {"pattern": {"type": "string"}, "path": {"type": "string"}, "glob": {"type": "string"}},
         ["pattern"],
     ),
+]
+
+TOOL_SPECS: list[ToolSpec] = [
+    *READ_TOOL_SPECS,
     _tool(
         "submit_proposal",
         "The benchmark: hot file, alias, call, fingerprint (or empty), the hot file's own tests, "
@@ -332,12 +336,84 @@ def validate(
         return str(e)
 
 
+REPAIR = """\
+A referee box ran the config your proposal became. Its report follows. Each FAIL line \
+is a rule the config broke, and the harness will not measure the target until every one \
+passes; WARN lines are advice. Read whatever code you need, then call submit_proposal \
+again. You may change anything in the proposal, including the hot file, the call and \
+the inputs.
+
+{report}
+"""
+
+
 @dataclass
 class Outcome:
     proposal: Proposal
     text: str
     turns: int
     usage: Usage = field(default_factory=Usage)
+
+
+@dataclass
+class _Session:
+    messages: list[Message]
+    usage: Usage = field(default_factory=Usage)
+
+    def save(self, out: Path) -> None:
+        (out / "messages.json").write_text(json.dumps(self.messages, indent=2) + "\n")
+        (out / "usage.json").write_text(json.dumps(self.usage.to_dict(), indent=2) + "\n")
+
+
+def _converse(
+    model: ChatModel,
+    session: _Session,
+    out: Path,
+    draft: Draft,
+    template: RunConfig,
+    *,
+    when: str,
+    max_turns: int,
+) -> Outcome:
+    """Converse until a proposal is accepted or ``max_turns`` replies have come back."""
+    repo = out / REPO_DIR
+    messages = session.messages
+    for turn in range(1, max_turns + 1):
+        resp = model.complete(messages, TOOL_SPECS, cache_key=f"intake-{draft.name}")
+        session.usage = session.usage + resp.usage
+        messages.append(resp.message)
+        accepted: tuple[Proposal, str] | None = None
+        if not resp.tool_calls:
+            messages.append(
+                {"role": "user", "content": "Use the tools, then call submit_proposal."}
+            )
+        for call in resp.tool_calls:
+            if call.name == "submit_proposal":
+                result = validate(call.arguments, repo, draft, template, when)
+                if isinstance(result, str):
+                    reply = f"not accepted: {result}"
+                else:
+                    reply = "accepted"
+                    accepted = accepted or result
+            elif call.name in READ_TOOLS:
+                try:
+                    reply = READ_TOOLS[call.name](repo, call.arguments)
+                except (ToolError, ValueError, OSError) as e:
+                    reply = f"error: {e}"
+            else:
+                reply = f"error: unknown tool {call.name!r}; available: {', '.join([*READ_TOOLS, 'submit_proposal'])}"
+            messages.append({"role": "tool", "tool_call_id": call.id, "content": reply})
+        if accepted is not None:
+            return Outcome(accepted[0], accepted[1], turn, session.usage)
+        left = max_turns - turn
+        if left == WARN_TURNS_LEFT:
+            messages.append(
+                {
+                    "role": "user",
+                    "content": f"{left} replies left. Call submit_proposal with your best answer.",
+                }
+            )
+    raise ProposeError(f"no proposal accepted in {max_turns} turns")
 
 
 def propose(
@@ -351,51 +427,37 @@ def propose(
     max_turns: int,
     prompt: str | None = None,
 ) -> Outcome:
-    """Converse until a proposal is accepted or ``max_turns`` replies have come back."""
-    repo = out / REPO_DIR
+    """A new conversation: the brief, the tools, until a proposal is accepted."""
     system = PROMPT.read_text() if prompt is None else prompt
-    messages: list[Message] = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": brief},
-    ]
-    usage = Usage()
+    session = _Session([{"role": "system", "content": system}, {"role": "user", "content": brief}])
     try:
-        for turn in range(1, max_turns + 1):
-            resp = model.complete(messages, TOOL_SPECS, cache_key=f"intake-{draft.name}")
-            usage = usage + resp.usage
-            messages.append(resp.message)
-            accepted: tuple[Proposal, str] | None = None
-            if not resp.tool_calls:
-                messages.append(
-                    {"role": "user", "content": "Use the tools, then call submit_proposal."}
-                )
-            for call in resp.tool_calls:
-                if call.name == "submit_proposal":
-                    result = validate(call.arguments, repo, draft, template, when)
-                    if isinstance(result, str):
-                        reply = f"not accepted: {result}"
-                    else:
-                        reply = "accepted"
-                        accepted = accepted or result
-                elif call.name in READ_TOOLS:
-                    try:
-                        reply = READ_TOOLS[call.name](repo, call.arguments)
-                    except (ToolError, ValueError, OSError) as e:
-                        reply = f"error: {e}"
-                else:
-                    reply = f"error: unknown tool {call.name!r}; available: {', '.join([*READ_TOOLS, 'submit_proposal'])}"
-                messages.append({"role": "tool", "tool_call_id": call.id, "content": reply})
-            if accepted is not None:
-                return Outcome(accepted[0], accepted[1], turn, usage)
-            left = max_turns - turn
-            if left == WARN_TURNS_LEFT:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": f"{left} replies left. Call submit_proposal with your best answer.",
-                    }
-                )
-        raise ProposeError(f"no proposal accepted in {max_turns} turns")
+        return _converse(model, session, out, draft, template, when=when, max_turns=max_turns)
     finally:
-        (out / "messages.json").write_text(json.dumps(messages, indent=2) + "\n")
-        (out / "usage.json").write_text(json.dumps(usage.to_dict(), indent=2) + "\n")
+        session.save(out)
+
+
+def repair(
+    model: ChatModel,
+    out: Path,
+    draft: Draft,
+    template: RunConfig,
+    report: str,
+    *,
+    when: str,
+    max_turns: int,
+) -> Outcome:
+    """The saved conversation, continued with a failed check's report, until a new proposal.
+
+    Same messages and cache key, so everything the model read before is cached input.
+    The saved usage is carried forward, so ``usage.json`` stays the conversation's total.
+    """
+    messages: list[Message] = json.loads((out / "messages.json").read_text())
+    usage_path = out / "usage.json"
+    usage = Usage.from_dict(json.loads(usage_path.read_text())) if usage_path.is_file() else Usage()
+    session = _Session(
+        [*messages, {"role": "user", "content": REPAIR.format(report=report)}], usage
+    )
+    try:
+        return _converse(model, session, out, draft, template, when=when, max_turns=max_turns)
+    finally:
+        session.save(out)

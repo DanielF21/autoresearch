@@ -54,12 +54,14 @@ class FakeChatModel:
     script: list[Scripted] = field(default_factory=list)
     requests: list[list[Message]] = field(default_factory=list)
     cache_keys: list[str] = field(default_factory=list)
+    offered: list[list[str]] = field(default_factory=list)  # tool names, per request
 
     def complete(
         self, messages: list[Message], tools: list[ToolSpec], *, cache_key: str
     ) -> ModelResponse:
         self.requests.append([dict(m) for m in messages])
         self.cache_keys.append(cache_key)
+        self.offered.append([t["function"]["name"] for t in tools])
         if not self.script:
             raise ModelError("fake model script exhausted")
         item = self.script.pop(0)

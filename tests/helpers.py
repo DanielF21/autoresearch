@@ -49,7 +49,7 @@ def referee_box(
     fp_match: bool = True,
     patched_verify_fails: bool = False,
     verify_fails_for: tuple[str, ...] = (),
-    contaminate_pairs: bool = False,
+    contaminate_pairs: bool | int = False,
     cleanup_ok: bool = True,
 ) -> FakeBox:
     """A referee box whose patched tree runs ``speedup`` times faster than the base.
@@ -58,9 +58,13 @@ def referee_box(
     box can answer differently per attempt. ``per_input`` overrides it for named
     inputs, which is how a patch that trades one input for another is faked.
     ``head`` is what the box reports after checking out the base; the referee
-    refuses anything but the base sha.
+    refuses anything but the base sha. ``contaminate_pairs`` as True taints every
+    timing sample; as an integer it taints that many timing launches per input
+    (a pass of six pairs is twelve launches) and then lets the rest through,
+    which is how a retry that succeeds is faked.
     """
     box = box if box is not None else FakeBox()
+    timing_launches: dict[str, int] = {}
 
     box.on("git checkout -q --detach", ok(f"{head}\n"))
 
@@ -150,7 +154,12 @@ def referee_box(
         ratio = (per_input or {}).get(name, current_speedup())
         t = 1.0 / ratio if patched else 1.0
         fixed = 0.31 if patched else 0.29
-        if contaminate_pairs:
+        launch = timing_launches.get(name, 0)
+        timing_launches[name] = launch + 1
+        tainted = (
+            contaminate_pairs if isinstance(contaminate_pairs, bool) else launch < contaminate_pairs
+        )
+        if tainted:
             samples = [{"t": t, "contaminated": True, "reasons": ["steal"]}]
             return ok(
                 json.dumps(

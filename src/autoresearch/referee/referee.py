@@ -183,6 +183,7 @@ class _InputFacts:
         self.pairs: tuple[PairTiming, ...] = ()
         self.speedup: float | None = None
         self.retried = False
+        self.retries = 0
         self.errors: list[str] = []
 
     def finish(self) -> InputTiming:
@@ -195,6 +196,7 @@ class _InputFacts:
             speedup=self.speedup,
             retried=self.retried,
             errors=tuple(self.errors),
+            retries=self.retries,
         )
 
 
@@ -466,23 +468,28 @@ class Referee:
             inp.errors.append("timing skipped: patched tree cannot run this input")
 
     def _time_input(self, inp: _InputFacts) -> None:
-        """Six pairs, retried once if too few came back clean.
+        """Six pairs, retried up to ``timing_retries`` times if too few came back clean.
 
-        The retry replaces the first pass rather than adding to it, so only the
-        second pass is recorded. ``retried`` says that happened: without it a
-        retry is invisible in the record and shows up only as unexplained wall
-        clock, which is what attempt 0009 of t1_w4b turned out to be.
+        Each retry replaces the pass before it rather than adding to it, so only
+        the last pass is recorded. ``retries`` says how many happened: without it
+        a retry is invisible in the record and shows up only as unexplained wall
+        clock, which is what attempt 0009 of t1_w4b turned out to be. An input
+        still short of clean pairs after the last retry is left untimed, and the
+        measurement then cannot clear the noise floor.
         """
         cfg = self._config.referee
         pairs = self._time_pairs(inp.spec)
-        if not timing.enough_clean(pairs, cfg.min_clean_pairs):
-            inp.retried = True
+        while (
+            not timing.enough_clean(pairs, cfg.min_clean_pairs) and inp.retries < cfg.timing_retries
+        ):
+            inp.retries += 1
             pairs = self._time_pairs(inp.spec)
+        inp.retried = inp.retries > 0
         inp.pairs = pairs
         if not timing.enough_clean(pairs, cfg.min_clean_pairs):
             inp.errors.append(
-                f"only {len(timing.clean_pairs(pairs))} clean pairs of "
-                f"{cfg.pairs} after a retry; median not computed"
+                f"only {len(timing.clean_pairs(pairs))} clean pairs of {cfg.pairs} after "
+                f"{inp.retries} retries; untimed, so this attempt cannot clear the noise floor"
             )
             return
         inp.speedup = timing.median_ratio(pairs)

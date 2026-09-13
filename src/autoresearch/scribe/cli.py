@@ -1,8 +1,10 @@
-"""``uv run python -m autoresearch.scribe RUN_DIR``: filter a run's candidates, then one
-model picks one and writes its pull request.
+"""``uv run autoresearch scribe RUN_DIR``: filter a run's candidates, then one model
+picks one and writes its pull request.
 
-Filtering and fetching merged pull requests call no model. When no candidate passes
-the filter, the command prints why and stops before any model call.
+Filtering, fetching merged pull requests and checking out the source call no model.
+When no candidate passes the filter, the command prints why and stops before any
+model call. ``--source`` names a checkout at the run's sha; without it one is made
+under ``<out>/src``.
 """
 
 from __future__ import annotations
@@ -13,7 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from autoresearch.model.protocol import ChatModel, ModelError
-from autoresearch.scribe import candidates
+from autoresearch.scribe import candidates, source
 from autoresearch.scribe.prs import (
     GhError,
     GhRunner,
@@ -37,6 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--prs", help="a saved prs.json to reuse instead of fetching")
     p.add_argument("--model", help="default: the run's worker model")
     p.add_argument("--out", default=str(DEFAULT_OUT))
+    p.add_argument(
+        "--source", help="a checkout at the run's sha; default: one made under <out>/src"
+    )
     return p
 
 
@@ -50,12 +55,16 @@ def main(
     run_dir = Path(args.run_dir)
     target = candidates.read_target(run_dir)
     kept, excluded = candidates.filter_candidates(candidates.load_candidates(run_dir))
-    for number, reasons in excluded.items():
-        print(f"attempt {number:04d} excluded: {'; '.join(reasons)}")
     if not kept:
+        for number, reasons in excluded.items():
+            print(f"attempt {number:04d} excluded: {'; '.join(reasons)}")
         print("No candidate passed the filter. No model was called.")
         return 1
-    print(f"Passed the filter: {', '.join(f'{c.number:04d}' for c in kept)}")
+    kept, left_out = candidates.shortlist(kept)
+    excluded = dict(sorted({**excluded, **left_out}.items()))
+    for number, reasons in excluded.items():
+        print(f"attempt {number:04d} excluded: {'; '.join(reasons)}")
+    print(f"Shown to the model: {', '.join(f'{c.number:04d}' for c in kept)}")
 
     try:
         if args.prs:
@@ -63,7 +72,13 @@ def main(
         else:
             repo = args.repo or github_repo(target.repo)
             merged = fetch_merged_prs(gh or SubprocessGh(), repo, args.n)
-    except (GhError, ValueError) as e:
+        src = source.source_dir(
+            target.repo,
+            target.sha,
+            Path(args.source) if args.source else None,
+            Path(args.out) / "src",
+        )
+    except (GhError, ValueError, source.SourceError) as e:
         print(f"stopped: {e}")
         return 1
 
@@ -80,7 +95,7 @@ def main(
         env.load_dotenv()
         model = SailChatModel(worker_config(run_dir, args.model))
     try:
-        draft = run(model, target, kept, merged, out)
+        draft = run(model, target, kept, merged, out, source=src)
     except (ModelError, ScribeError) as e:
         print(f"stopped: {e}\n{out}")
         return 1
@@ -90,4 +105,5 @@ def main(
         print(f"No candidate picked: {draft.reasons}")
     else:
         print(f"Picked attempt {draft.pick}: {draft.reasons}\n\n{draft.title}\n\n{draft.body}")
+        print(f"\npull request: {out / 'pr.md'}\npatch:        {out / 'patch.diff'}")
     return 0

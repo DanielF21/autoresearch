@@ -6,6 +6,7 @@ attempt starts from and is measured against the same base commit.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -113,6 +114,23 @@ def test_duplicate_is_recorded_and_measured_again(tmp_path: Path) -> None:
     assert attempts[1].measurement is not None
     full_runs = [c for c in factory.created[0].commands if "--scope full" in c]
     assert len(full_runs) == 2
+
+
+def test_prompt_versions_go_by_worker_slot_and_are_recorded(tmp_path: Path) -> None:
+    cfg, paths, pool, _ = start(tmp_path, 3, {"x = a": 1.05, "x = b": 1.06, "x = c": 1.07})
+    cfg = replace(cfg, worker=replace(cfg.worker, prompts=("v1", "v2")))
+    worker = FakeWorker([submitted(diff_for(x)) for x in ("a", "b", "c")])
+    run_round(1, cfg, paths, worker, pool)
+    # Slot w runs prompts[w % 2]; a third slot wraps round to the first version.
+    # Workers run concurrently, so order the inputs by slot before reading them.
+    inputs = sorted(worker.inputs, key=lambda i: i.ref.worker)
+    assert [i.prompt for i in inputs] == ["v1", "v2", "v1"]
+    assert [i.cache_key.rsplit("-", 1)[1] for i in inputs] == ["v1", "v2", "v1"]
+    recorded = [
+        json.loads((paths.attempt(i.ref) / history.INPUT_JSON).read_text())["prompt"]
+        for i in inputs
+    ]
+    assert recorded == ["v1", "v2", "v1"]
 
 
 def test_width_two_records_both_and_best_is_the_maximum(tmp_path: Path) -> None:

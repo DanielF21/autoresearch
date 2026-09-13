@@ -1,0 +1,173 @@
+# Target 2: pyparsing, width 4. DRAFT, not yet admitted.
+#
+# The inputs below are the cases of the upstream benchmark tests/perf_pyparsing.py,
+# expressed as the harness needs them: setup once, then one call. Which of them
+# make the final set is a user decision after `autoresearch check` has run; every
+# noise_floor is absent until calibrate.py has measured it.
+#
+# Local timings (one laptop, min of 3, 2026-09-12) are in the inline comments so
+# the set can be pruned; the referee's own numbers replace them after check.
+
+[run]
+run_id = "t2_w4"
+width = 4
+rounds = 32
+
+[target]
+name = "pyparsing_perf"
+repo = "https://github.com/pyparsing/pyparsing"
+sha = "efd56db4e59f36b1673ce0eb0823e3afaa9d1201"
+package = "pyparsing"
+alias = "pp"
+package_root = "."            # flat layout: pyparsing/ sits at the repo root
+hot_file = "pyparsing/core.py"
+call = "run()"                # every input's setup defines run; the modes differ per input
+pip = ["railroad-diagrams", "jinja2", "matplotlib"]   # tests/test_diagram.py and test_matplotlib_cases.py
+allow = ["pyparsing/**"]
+deny = ["tests/**", "examples/**", "docs/**"]
+# ParseResults renders by content, but names live alongside the list, so both are
+# hashed. Strings and lists (scan results) pass through unchanged.
+fingerprint = "[result.as_list(), result.as_dict()] if hasattr(result, 'as_list') else result"
+docs = []                     # profile_target.py writes these under configs/docs/t2 once the set is chosen
+
+[target.tests]
+module = "tests/test_unit.py"   # 1940 of the 2157 tests; 7s on four workers locally
+full = "tests"                  # 10s on four workers locally; tox also runs examples/tiny/tests
+
+# Every input imports the upstream perf script from the tree under test (ROOT) for
+# its corpus generators and grammars, then sets the memoization mode. Each input
+# runs in its own process, so the class level packrat toggle does not leak between
+# them. Modes are the axis: a patch that helps packrat on can hurt packrat off.
+
+[[target.inputs]]
+name = "csv_packrat_off"      # 0.19s local
+setup = """
+import sys; sys.path.insert(0, str(ROOT / "tests"))
+import perf_pyparsing as perf
+pp.ParserElement.disable_memoization()
+text = perf.gen_csv(3000, 8)
+g = perf.csv_grammar()
+run = lambda: g.parse_string(text, parse_all=True)
+"""
+
+[[target.inputs]]
+name = "csv_packrat_on"       # 0.38s local
+setup = """
+import sys; sys.path.insert(0, str(ROOT / "tests"))
+import perf_pyparsing as perf
+pp.ParserElement.disable_memoization()
+pp.ParserElement.enable_packrat(force=True)
+text = perf.gen_csv(3000, 8)
+g = perf.csv_grammar()
+run = lambda: g.parse_string(text, parse_all=True)
+"""
+
+[[target.inputs]]
+name = "expr_packrat_on"      # 0.16s local; infix_notation, the packrat showcase
+setup = """
+import sys; sys.path.insert(0, str(ROOT / "tests"))
+import perf_pyparsing as perf
+pp.ParserElement.disable_memoization()
+pp.ParserElement.enable_packrat(force=True)
+text = perf.gen_expr_sequence(200)
+g = perf.arithmetic_grammar_non_recursive()
+run = lambda: g.parse_string(text, parse_all=True)
+"""
+
+[[target.inputs]]
+name = "expr_packrat_off"     # 9.9s local; the same grammar without memoization, 60x slower
+setup = """
+import sys; sys.path.insert(0, str(ROOT / "tests"))
+import perf_pyparsing as perf
+pp.ParserElement.disable_memoization()
+text = perf.gen_expr_sequence(200)
+g = perf.arithmetic_grammar_non_recursive()
+run = lambda: g.parse_string(text, parse_all=True)
+"""
+
+[[target.inputs]]
+name = "expr_leftrec"         # 0.033s local; the left recursion memo, a third engine path
+setup = """
+import sys; sys.path.insert(0, str(ROOT / "tests"))
+import perf_pyparsing as perf
+pp.ParserElement.disable_memoization()
+text = perf.gen_expr_sequence(200)
+g = perf.arithmetic_grammar_left_recursive()
+run = lambda: g.parse_string(text, parse_all=True)
+"""
+
+[[target.inputs]]
+name = "scan_log"             # 0.27s local; scan_string over 20000 lines
+setup = """
+import sys; sys.path.insert(0, str(ROOT / "tests"))
+import perf_pyparsing as perf
+pp.ParserElement.disable_memoization()
+text = perf.gen_log(20000)
+g = perf.log_grammar()
+run = lambda: [(t.as_list(), s, e) for t, s, e in g.scan_string(text)]
+"""
+
+[[target.inputs]]
+name = "transform_upper"      # 0.30s local; transform_string with a parse action
+setup = """
+import sys; sys.path.insert(0, str(ROOT / "tests"))
+import perf_pyparsing as perf
+pp.ParserElement.disable_memoization()
+text = perf.gen_log(20000)
+g = perf.log_grammar()
+g.add_parse_action(lambda s, l, t: [t.seq, f"[{t.level}]", t.msg.upper()])
+run = lambda: g.transform_string(text)
+"""
+
+[[target.inputs]]
+name = "or_many"              # 1.47s local; Or over 2000 literals
+setup = """
+import sys; sys.path.insert(0, str(ROOT / "tests"))
+import perf_pyparsing as perf
+import random
+pp.ParserElement.disable_memoization()
+rnd = random.Random(4)
+alts = [pp.Literal(f"KW{rnd.randint(0, 4000)}") for _ in range(2000)]
+text = " ".join(a.match for a in alts[:1000])
+g = pp.Or(alts)
+run = lambda: [(t.as_list(), s, e) for t, s, e in g.scan_string(text)]
+"""
+
+[[target.inputs]]
+name = "results_nonmodal"     # 0.009s local; results names with modal=False, near the 5ms floor
+setup = """
+import sys; sys.path.insert(0, str(ROOT / "tests"))
+import perf_pyparsing as perf
+pp.ParserElement.disable_memoization()
+text = perf.gen_words_and_ints(1000)
+g = perf.results_accumulator(modal=False)
+run = lambda: g.parse_string(text)
+"""
+
+[worker]
+model = "deepseek/deepseek-v4-pro-0813"
+reasoning_effort = "high"
+completion_window = "asap"
+max_turns = 80
+max_seconds = 3600
+max_input_tokens = 8000000
+turn_timeout = 600
+
+[referee]
+pairs = 6
+repeats_per_launch = 7
+min_clean_pairs = 4
+hash_seeds = [0, 1, 2, 3, 4]
+
+[boxes]
+worker_size = "m"
+referee_size = "m"
+control_size = "s"
+disk_gib = 32
+
+[storage]
+volume = "autoresearch"
+mount = "/mnt/autoresearch"
+
+[observe]
+enabled = true

@@ -1,0 +1,37 @@
+Callers for the same profile: parser.parse_string(text, parse_all=True) with import random pp.ParserElement.disable_memoization() rnd = random.Random(101) rows = 3500 cols = 8 lines = [] for _ in range(rows): lines.append(",".join(f"v{rnd.randint(0, 10_000)}" for _ in range(cols))) text = "\n".join(lines) field = pp.Word(pp.alphanums) row = pp.DelimitedList(field) parser = pp.OneOrMore(row)
+   Ordered by: internal time
+   List reduced from 60 to 10 due to restriction <10>
+
+Function                                                        was called by...
+                                                                    ncalls  tottime  cumtime
+pyparsing/core.py:928(_parseNoCache)       <-       2    0.000    0.659  pyparsing/core.py:1286(parse_string)
+                                                                 59503/7003    0.126    0.617  pyparsing/core.py:4618(parseImpl)
+                                                                 31501/3501    0.061    0.637  pyparsing/core.py:5167(parseImpl)
+                                                                 31501/3501    0.070    0.653  pyparsing/core.py:5692(parseImpl)
+pyparsing/results.py:170(__new__)          <-  112004    0.073    0.111  pyparsing/core.py:928(_parseNoCache)
+pyparsing/core.py:4618(parseImpl)          <- 31502/3502    0.047    0.626  pyparsing/core.py:928(_parseNoCache)
+pyparsing/results.py:194(__init__)         <-  112004    0.036    0.054  pyparsing/core.py:928(_parseNoCache)
+{built-in method builtins.isinstance}                           <-       2    0.000    0.000  pyparsing/core.py:1622(__add__)
+                                                                         4    0.000    0.000  pyparsing/core.py:2266(__eq__)
+                                                                         4    0.000    0.000  pyparsing/core.py:4299(__init__)
+                                                                         2    0.000    0.000  pyparsing/core.py:4314(<genexpr>)
+                                                                         3    0.000    0.000  pyparsing/core.py:4508(__init__)
+                                                                      3501    0.001    0.004  pyparsing/core.py:5167(parseImpl)
+                                                                    213508    0.027    0.027  pyparsing/results.py:170(__new__)
+                                                                     52500    0.006    0.006  pyparsing/results.py:549(__iadd__)
+pyparsing/results.py:549(__iadd__)         <-   28001    0.015    0.022  pyparsing/core.py:4618(parseImpl)
+                                                                     24499    0.013    0.018  pyparsing/core.py:5692(parseImpl)
+pyparsing/core.py:909(preParse)            <-   59504    0.025    0.031  pyparsing/core.py:928(_parseNoCache)
+                                                                         1    0.000    0.000  pyparsing/core.py:1286(parse_string)
+pyparsing/core.py:5692(parseImpl)          <-       1    0.003    0.659  pyparsing/core.py:928(_parseNoCache)
+                                                                      3500    0.021    0.580  pyparsing/core.py:5820(parseImpl)
+{built-in method builtins.len}                                  <-   59505    0.007    0.007  pyparsing/core.py:909(preParse)
+                                                                    122507    0.013    0.013  pyparsing/core.py:928(_parseNoCache)
+                                                                         1    0.000    0.000  pyparsing/core.py:1145(reset_cache)
+                                                                         1    0.000    0.000  pyparsing/core.py:2751(__init__)
+                                                                         2    0.000    0.000  pyparsing/core.py:4183(parseImpl)
+pyparsing/util.py:500(deprecate_argument)  <-       1    0.000    0.000  pyparsing/core.py:1286(parse_string)
+                                                                         1    0.000    0.000  pyparsing/core.py:2751(__init__)
+                                                                    112004    0.017    0.017  pyparsing/results.py:194(__init__)
+
+

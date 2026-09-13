@@ -158,6 +158,10 @@ class WorkerConfig:
     max_seconds: int
     max_input_tokens: int
     turn_timeout: int
+    # System prompt versions by worker slot: slot w runs prompts[w % len(prompts)].
+    # One name means every worker is told the same thing, which is every run
+    # before the four prompt experiment.
+    prompts: tuple[str, ...] = ("v1",)
 
 
 @dataclass(frozen=True)
@@ -168,6 +172,11 @@ class RefereeConfig:
     repeats_per_launch: int
     min_clean_pairs: int
     hash_seeds: tuple[int, ...]
+    # Passes of ``pairs`` retried on an input with fewer than ``min_clean_pairs``
+    # clean, before the input is recorded as untimed. The cheap inputs are the
+    # ones that fail, so a retry costs seconds; the width experiment lost an
+    # input on 13 of 912 attempts with one retry.
+    timing_retries: int = 2
 
 
 @dataclass(frozen=True)
@@ -247,6 +256,24 @@ def _str(section: dict[str, Any], name: str, key: str) -> str:
     if not isinstance(value, str) or not value:
         raise ConfigError(f"[{name}].{key} must be a non empty string")
     return value
+
+
+def _prompt_versions(worker: dict[str, Any]) -> tuple[str, ...]:
+    """``[worker].prompts``: absent means v1 for every slot. Each name must be a
+    version the worker package has, and it is named here so a typo fails the
+    config, not the first attempt of a paid run."""
+    # Imported here: the prompt package imports this module for the target types.
+    from autoresearch.worker.prompt import VERSIONS
+
+    raw = worker.get("prompts", ["v1"])
+    if not isinstance(raw, list) or not raw or not all(isinstance(v, str) and v for v in raw):
+        raise ConfigError("[worker].prompts must be a non empty list of prompt version names")
+    unknown = [v for v in raw if v not in VERSIONS]
+    if unknown:
+        raise ConfigError(
+            f"[worker].prompts names unknown versions {unknown}; known: {sorted(VERSIONS)}"
+        )
+    return tuple(raw)
 
 
 def _str_list(section: dict[str, Any], name: str, key: str) -> tuple[str, ...]:
@@ -391,6 +418,9 @@ def parse_config(text: str) -> RunConfig:
     min_clean = referee.get("min_clean_pairs", max(1, (2 * pairs) // 3))
     if not isinstance(min_clean, int) or min_clean < 1 or min_clean > pairs:
         raise ConfigError("[referee].min_clean_pairs must be between 1 and pairs")
+    retries = referee.get("timing_retries", 2)
+    if not isinstance(retries, int) or isinstance(retries, bool) or retries < 0:
+        raise ConfigError("[referee].timing_retries must be an integer of at least 0")
     seeds_raw = referee.get("hash_seeds", [0, 1, 2, 3, 4])
     if (
         not isinstance(seeds_raw, list)
@@ -412,12 +442,14 @@ def parse_config(text: str) -> RunConfig:
             max_seconds=_positive_int(worker, "worker", "max_seconds"),
             max_input_tokens=_positive_int(worker, "worker", "max_input_tokens"),
             turn_timeout=_positive_int(worker, "worker", "turn_timeout"),
+            prompts=_prompt_versions(worker),
         ),
         referee=RefereeConfig(
             pairs=pairs,
             repeats_per_launch=_positive_int(referee, "referee", "repeats_per_launch"),
             min_clean_pairs=min_clean,
             hash_seeds=tuple(seeds_raw),
+            timing_retries=retries,
         ),
         boxes=BoxConfig(
             worker_size=_size(boxes, "boxes", "worker_size"),

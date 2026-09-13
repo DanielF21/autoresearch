@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
 
 from autoresearch.model.fake_model import FakeChatModel, text, tool_call
 from autoresearch.scribe import candidates, cli, prs, scribe
-from tests.scribe_helpers import make_run
+from tests.scribe_helpers import git_source, make_run
 
 PATCH = (
     "diff --git a/pkg/mod.py b/pkg/mod.py\n--- a/pkg/mod.py\n+++ b/pkg/mod.py\n"
@@ -54,7 +54,7 @@ class FakeGh:
         return json.dumps(self.items)
 
 
-def clean_run(tmp_path: Path) -> Path:
+def clean_run(tmp_path: Path, sha: str = "a" * 40) -> Path:
     return make_run(
         tmp_path,
         [
@@ -62,6 +62,7 @@ def clean_run(tmp_path: Path) -> Path:
             {"patch": OTHER, "speedups": {"dense": 2.0, "sparse": 1.2}},
             {"patch": PATCH, "speedups": {"dense": 3.0, "sparse": 0.5}},
         ],
+        sha=sha,
     )
 
 
@@ -168,6 +169,8 @@ def test_the_model_picks_then_writes_in_the_same_conversation(tmp_path: Path) ->
     assert json.loads((out / "pick.json").read_text())["attempt"] == 1
     assert (out / "body.md").read_text() == "Body text.\n"
     assert (out / "title.txt").read_text() == "ENH: faster table\n"
+    assert (out / "pr.md").read_text() == "# ENH: faster table\n\nBody text.\n"
+    assert (out / "patch.diff").read_text() == PATCH
     assert json.loads((out / "usage.json").read_text())["prompt_tokens"] == 300
     assert len(json.loads((out / "messages.json").read_text())) == len(write) + 2
 
@@ -181,6 +184,7 @@ def test_declining_every_candidate_writes_no_pull_request(tmp_path: Path) -> Non
     draft = scribe.run(model, candidates.read_target(run), kept, [], tmp_path, prompt="p")
     assert draft.pick is None and draft.reasons == "private attribute"
     assert len(model.requests) == 1 and not (tmp_path / "body.md").exists()
+    assert not (tmp_path / "pr.md").exists() and not (tmp_path / "patch.diff").exists()
     assert json.loads((tmp_path / "pick.json").read_text()) == {
         "attempt": None,
         "reasons": "private attribute",
@@ -195,6 +199,118 @@ def test_replies_without_a_valid_call_stop_after_the_retries(tmp_path: Path) -> 
         scribe.run(model, candidates.read_target(run), kept, [], tmp_path, prompt="p")
     assert "Answer by calling submit_pick." in model.requests[1][-1]["content"]
     assert (tmp_path / "messages.json").exists() and not (tmp_path / "pick.json").exists()
+
+
+def test_reads_of_the_source_are_answered_and_are_not_misses(tmp_path: Path) -> None:
+    src, sha = git_source(tmp_path)
+    run = clean_run(tmp_path, sha)
+    kept, _ = candidates.filter_candidates(candidates.load_candidates(run))
+    reads = [
+        tool_call("read_file", {"path": "pkg/mod.py"}, f"r{n}") for n in range(scribe.TRIES + 1)
+    ]
+    model = FakeChatModel(
+        script=[
+            *reads,
+            tool_call("grep", {"pattern": "LIMIT"}, "g1"),
+            tool_call("read_file", {"path": "../../etc/passwd"}, "bad"),
+            tool_call("submit_pick", {"attempt": 1, "reasons": "rebuilt per call"}),
+            tool_call("submit_pr", {"title": "t", "body": "b"}),
+        ]
+    )
+    draft = scribe.run(
+        model, candidates.read_target(run), kept, [], tmp_path, prompt="p", source=src
+    )
+    assert draft.pick == 1
+    replies = {m["tool_call_id"]: m["content"] for m in model.requests[-1] if m["role"] == "tool"}
+    assert "the table is rebuilt on every call" in replies["r0"]
+    assert "pkg/mod.py:2: LIMIT = 64" in replies["g1"]
+    assert replies["bad"].startswith("error:") and "outside" in replies["bad"]
+
+
+def test_reads_past_the_limit_are_refused_and_count_as_misses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    src, sha = git_source(tmp_path)
+    run = clean_run(tmp_path, sha)
+    kept, _ = candidates.filter_candidates(candidates.load_candidates(run))
+    monkeypatch.setattr(scribe, "MAX_READS", 2)
+    model = FakeChatModel(
+        script=[
+            tool_call("read_file", {"path": "pkg/mod.py"}, f"r{n}") for n in range(2 + scribe.TRIES)
+        ]
+    )
+    with pytest.raises(scribe.ScribeError, match="no valid submit_pick"):
+        scribe.run(model, candidates.read_target(run), kept, [], tmp_path, prompt="p", source=src)
+    assert "all 2 reads are used" in model.requests[-1][-1]["content"]
+
+
+def test_without_a_source_a_read_is_refused(tmp_path: Path) -> None:
+    run = clean_run(tmp_path)
+    kept, _ = candidates.filter_candidates(candidates.load_candidates(run))
+    model = FakeChatModel(
+        script=[
+            tool_call("read_file", {"path": "pkg/mod.py"}, "r0"),
+            tool_call("submit_pick", {"attempt": None, "reasons": "none"}),
+        ]
+    )
+    scribe.run(model, candidates.read_target(run), kept, [], tmp_path, prompt="p")
+    assert "the tools here are submit_pick" in model.requests[1][-1]["content"]
+
+
+def test_hyphens_and_dashes_are_found_in_prose_but_not_in_code_or_markdown() -> None:
+    body = (
+        "A full-graph path \u2014 cached, 1.3 s -> 0.3 s.\n\n"
+        "- a list item\n\n"
+        "| input | base |\n| --- | :---: |\n| `x - 1` | 2 |\n\n"
+        "```python\ny = a - b\n```\n"
+        "In-or-out sets, full-graph again."
+    )
+    assert scribe.prose_dashes(body) == ["full-graph", "\u2014", "->", "In-or-out"]
+    assert scribe.prose_dashes("| a |\n|---|---|\n- item `a-b`") == []
+    problem = scribe._validate_pr("")({"title": "Set-based speedup", "body": "Plain."})
+    assert problem is not None and "Set-based" in problem and "space instead" in problem
+    assert scribe._validate_pr("")({"title": "Set based speedup", "body": "Plain."}) is None
+
+
+def test_numbers_with_units_must_come_from_the_evidence() -> None:
+    evidence = "| dense | 6.23x | 1.0218 | 12.3 ms |\nGeometric mean: 3.00x."
+    body = (
+        "The call is 6.23x faster on dense, 6.2x rounded, 6x coarse, taking 12 ms. "
+        "It walks 1000 nodes. Claimed 7.1x elsewhere and 35% less time, 7.1x again."
+    )
+    assert scribe.unsupported_numbers(body, evidence) == ["7.1x", "35%"]
+    assert scribe.unsupported_numbers("0x1f and 3.00 x", evidence) == []
+
+
+def test_a_body_with_an_unmeasured_number_goes_back_to_the_model(tmp_path: Path) -> None:
+    run = clean_run(tmp_path)
+    kept, _ = candidates.filter_candidates(candidates.load_candidates(run))
+    model = FakeChatModel(
+        script=[
+            tool_call("submit_pick", {"attempt": 1, "reasons": "fastest"}),
+            tool_call("submit_pr", {"title": "t", "body": "About 9.9x faster."}, "p1"),
+            tool_call("submit_pr", {"title": "t", "body": "3.00x faster on dense."}, "p2"),
+        ]
+    )
+    draft = scribe.run(model, candidates.read_target(run), kept, [], tmp_path, prompt="p")
+    assert draft.body == "3.00x faster on dense."
+    assert "not in the measurements you were shown: 9.9x" in model.requests[2][-1]["content"]
+
+
+def test_the_shortlist_keeps_the_fastest_half_and_the_smallest_of_the_rest(
+    tmp_path: Path,
+) -> None:
+    (base, *_) = candidates.load_candidates(clean_run(tmp_path))
+    header = "--- a/pkg/mod.py\n+++ b/pkg/mod.py\n"
+    many = [
+        replace(base, number=n, speedup=float(n), patch=header + "+x\n" * n) for n in range(1, 31)
+    ]
+    kept, left = candidates.shortlist(many)
+    half = candidates.MAX_CANDIDATES // 2
+    assert [c.number for c in kept] == [*range(1, half + 1), *range(31 - half, 31)]
+    assert sorted(left) == list(range(half + 1, 31 - half))
+    assert all(r[0].startswith("not shortlisted") for r in left.values())
+    assert candidates.shortlist(many[:3]) == (many[:3], {})
 
 
 def test_worker_config_comes_from_the_run_with_an_optional_model(tmp_path: Path) -> None:
@@ -218,8 +334,12 @@ def test_cli_with_nothing_kept_calls_neither_gh_nor_a_model(
     assert not (tmp_path / "out").exists()
 
 
-def test_cli_end_to_end_with_fakes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    run = clean_run(tmp_path)
+def test_cli_end_to_end_with_fakes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    src, sha = git_source(tmp_path)
+    run = clean_run(tmp_path, sha)
+    monkeypatch.setattr(candidates, "MAX_CANDIDATES", 2)
     model = FakeChatModel(
         script=[
             tool_call("submit_pick", {"attempt": 2, "reasons": "smaller"}),
@@ -227,10 +347,24 @@ def test_cli_end_to_end_with_fakes(tmp_path: Path, capsys: pytest.CaptureFixture
         ]
     )
     gh = FakeGh(pool())
-    rc = cli.main([str(run), "--n", "2", "--out", str(tmp_path / "out")], model=model, gh=gh)
+    argv = [str(run), "--n", "2", "--out", str(tmp_path / "out"), "--source", str(src)]
+    rc = cli.main(argv, model=model, gh=gh)
     assert rc == 0 and gh.calls[0][3] == "o/r"
     (out,) = (tmp_path / "out" / "fake_run").iterdir()
     assert (out / "body.md").read_text() == "b\n"
+    assert (out / "pr.md").read_text() == "# ENH: t\n\nb\n"
+    assert (out / "patch.diff").read_text() == OTHER
     assert [p["number"] for p in json.loads((out / "prs.json").read_text())] == [5, 3]
     assert "regresses on: sparse" in json.loads((out / "excluded.json").read_text())["0003"][0]
     assert "Picked attempt 2: smaller" in capsys.readouterr().out
+
+
+def test_cli_stops_before_the_model_when_the_source_is_at_another_commit(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    src, _ = git_source(tmp_path)
+    run = clean_run(tmp_path)
+    model = FakeChatModel()
+    argv = [str(run), "--n", "2", "--out", str(tmp_path / "out"), "--source", str(src)]
+    assert cli.main(argv, model=model, gh=FakeGh(pool())) == 1
+    assert model.requests == [] and "the run is at aaaaaaaaaaaa" in capsys.readouterr().out

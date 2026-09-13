@@ -87,6 +87,7 @@ def test_measurement_round_trip() -> None:
                 speedup=1.0526,
                 retried=True,
                 errors=("one contaminated pair",),
+                retries=2,
             ),
             _input("sparse", 1.5),
         ),
@@ -97,6 +98,11 @@ def test_measurement_round_trip() -> None:
     assert Measurement.from_dict(m.to_dict()) == m
     assert m.tests_pass and m.result_matches is True and m.clears_noise
     assert m.inputs[0].retried and not m.inputs[1].retried
+    assert m.inputs[0].retries == 2 and m.inputs[1].retries == 0
+    # A record from before the count was kept says only that a retry happened.
+    old = m.inputs[0].to_dict()
+    del old["retries"]
+    assert InputTiming.from_dict(old).retries == 1
 
 
 def test_the_recorded_speedup_is_the_geometric_mean_over_inputs() -> None:
@@ -111,9 +117,10 @@ def test_the_recorded_speedup_is_the_geometric_mean_over_inputs() -> None:
     assert spike.speedup == pytest.approx(2.0 * 2 ** (1 / 5))
 
 
-def test_an_input_with_no_timing_is_left_out_of_the_mean() -> None:
+def test_an_input_with_no_timing_is_left_out_of_the_mean_and_named() -> None:
     m = Measurement(inputs=(_input("a", 4.0), _input("b", None)))
     assert m.speedup == 4.0 and m.worst_speedup == 4.0
+    assert m.untimed == ("b",) and m.to_dict()["untimed"] == ["b"]
     assert Measurement(inputs=(_input("b", None),)).speedup is None
 
 
@@ -164,6 +171,11 @@ def test_clears_noise_requires_every_condition() -> None:
     both_flat = replace(good, inputs=(_input("dense", 1.01), _input("sparse", 1.01)))
     assert not both_flat.clears_noise  # neither input clears its own floor
     assert not replace(good, inputs=(_input("dense", None), _input("sparse", None))).clears_noise
+    # One untimed input disqualifies the whole measurement, however good the rest:
+    # the mean over what was timed says nothing about what was not.
+    one_untimed = replace(good, inputs=(_input("dense", 30.0), _input("sparse", None)))
+    assert one_untimed.speedup == pytest.approx(30.0) and one_untimed.untimed == ("sparse",)
+    assert not one_untimed.clears_noise
     assert not replace(good, tests=(_suite("module"), _suite("full", ok=False))).clears_noise
     assert not replace(good, tests=(_suite("module"),)).clears_noise  # full suite never ran
     assert not replace(good, scope_violations=("tests edited",)).clears_noise

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from typing import Any
 
 from autoresearch import history
+from autoresearch.intake import scope
 from autoresearch.types import (
     AttemptRef,
     InputTiming,
@@ -78,6 +80,30 @@ def measurement(speedups: dict[str, float], tests_ok: bool = True) -> Measuremen
         ),
         inputs=tuple(timing(n, s) for n, s in speedups.items()),
     )
+
+
+def git_source(root: Path) -> tuple[Path, str]:
+    """A one commit repository holding the file the test patches touch, and its sha."""
+    src = root / "source"
+    (src / "pkg").mkdir(parents=True)
+    (src / "pkg" / "mod.py").write_text("# the table is rebuilt on every call\nLIMIT = 64\nx = 1\n")
+    for args in (["init", "-q"], ["add", "."], ["commit", "-qm", "base"]):
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t", *args],
+            cwd=src,
+            check=True,
+            capture_output=True,
+            env=scope.git_env(),
+        )
+    sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=src,
+        capture_output=True,
+        text=True,
+        check=True,
+        env=scope.git_env(),
+    ).stdout.strip()
+    return src, sha
 
 
 def make_run(

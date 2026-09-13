@@ -183,6 +183,36 @@ def filter_candidates(
     return kept, excluded
 
 
+# Chosen, not measured. Eight candidates made a 44k character pick message on t1_w4d;
+# a long run can keep hundreds, which would not fit one prompt.
+MAX_CANDIDATES = 12
+
+
+def shortlist(kept: list[Candidate]) -> tuple[list[Candidate], dict[int, tuple[str, ...]]]:
+    """At most ``MAX_CANDIDATES``: the fastest half, then the smallest diffs of the rest.
+
+    Speed alone would drop the small change a maintainer merges; size alone would drop
+    the change worth reading. The shortlist keeps attempt order, and every candidate left
+    out comes back with its reason.
+    """
+    if len(kept) <= MAX_CANDIDATES:
+        return list(kept), {}
+    half = MAX_CANDIDATES // 2
+    fastest = sorted(kept, key=lambda c: (-(c.speedup or 0.0), c.number))[:half]
+    chosen = {c.number for c in fastest}
+    rest = [c for c in kept if c.number not in chosen]
+    smallest = sorted(rest, key=lambda c: (changed_line_count(c.patch or ""), c.number))
+    chosen |= {c.number for c in smallest[: MAX_CANDIDATES - half]}
+    reason = (
+        f"not shortlisted: not among the {half} fastest or the "
+        f"{MAX_CANDIDATES - half} smallest diffs of the rest",
+    )
+    return (
+        [c for c in kept if c.number in chosen],
+        {c.number: reason for c in kept if c.number not in chosen},
+    )
+
+
 # ----- what the model reads about a candidate -------------------------------------------
 
 

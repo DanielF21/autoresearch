@@ -24,6 +24,7 @@ def test_pilot_config_loads() -> None:
     assert cfg.rounds == 32
     assert cfg.referee.pairs == 6
     assert cfg.referee.min_clean_pairs == 4
+    assert cfg.referee.timing_retries == 2  # the default; the frozen config predates the key
     assert [i.name for i in cfg.target.inputs] == [
         "er1000_005",
         "er1000_001",
@@ -95,6 +96,32 @@ def _with(key_path: str, value: str, source: Path = PILOT) -> str:
         else:
             out.append(line)
     return "\n".join(out)
+
+
+def test_timing_retries_is_read_and_validated() -> None:
+    # The frozen configs predate the key, so it is added beside min_clean_pairs here.
+    text = PILOT.read_text().replace(
+        "min_clean_pairs = 4", "min_clean_pairs = 4\ntiming_retries = 3"
+    )
+    assert parse_config(text).referee.timing_retries == 3
+    with pytest.raises(ConfigError, match="at least 0"):
+        parse_config(text.replace("timing_retries = 3", "timing_retries = -1"))
+    with pytest.raises(ConfigError, match="at least 0"):
+        parse_config(text.replace("timing_retries = 3", "timing_retries = true"))
+
+
+def test_prompt_versions_default_to_v1_and_are_checked_by_name() -> None:
+    assert load_config(PILOT).worker.prompts == ("v1",)
+    text = PILOT.read_text().replace(
+        "max_turns = 80", 'max_turns = 80\nprompts = ["v1", "v2", "v3", "v4"]'
+    )
+    assert parse_config(text).worker.prompts == ("v1", "v2", "v3", "v4")
+    with pytest.raises(ConfigError, match=r"unknown versions \['v9'\]; known: \['v1'"):
+        parse_config(text.replace('"v4"', '"v9"'))
+    with pytest.raises(ConfigError, match="non empty list"):
+        parse_config(text.replace('["v1", "v2", "v3", "v4"]', "[]"))
+    four = load_config(CONFIGS / "t1_p3_w4.toml")
+    assert four.worker.prompts == ("v1", "v2", "v3", "v4") and four.width == 4
 
 
 @pytest.mark.parametrize(

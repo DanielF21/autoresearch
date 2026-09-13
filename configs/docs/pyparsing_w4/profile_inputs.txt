@@ -1,0 +1,23 @@
+Cost of parser.parse_string(text, parse_all=True) on each of the 5 inputs it is timed on,
+at pyparsing efd56db4e59f, the base commit for every attempt.
+
+Absolute times were taken on a referee box and will differ in yours. What
+carries over is the ratio between the inputs and where the time goes.
+'hot self' is the self time spent inside the hot file under cProfile,
+and 'hot share' is its share of all self time. A change with a fixed
+setup cost is free on the slowest input and can be the entire runtime
+of the fastest.
+
+input                 call  hot self hot share  setup
+flat_csv_words     0.2113s   0.4053s     61.4%  import random pp.ParserElement.disable_memoization() rnd = random.Random(101) rows = 3500 cols = 8 lines = [] for _ in range(rows): lines.append(",".join(f"v{rnd.randint(0, 10_000)}" for _ in range(cols))) text = "\n".join(lines) field = pp.Word(pp.alphanums) row = pp.DelimitedList(field) parser = pp.OneOrMore(row)
+matchfirst_many_alts   0.1278s   0.2694s     80.5%  import random pp.ParserElement.disable_memoization() rnd = random.Random(202) n_alts = 1000 n_tokens = 500 alts = [pp.Literal(f"KW{i:05d}") for i in range(n_alts)] rnd.shuffle(alts) text = " ".join(a.match for a in alts[:n_tokens]) parser = pp.OneOrMore(pp.MatchFirst(alts))
+or_many_alts       0.6317s   1.3614s     81.6%  import random pp.ParserElement.disable_memoization() rnd = random.Random(303) n_alts = 1000 n_tokens = 500 alts = [pp.Literal(f"KW{i:05d}") for i in range(n_alts)] rnd.shuffle(alts) text = " ".join(a.match for a in alts[:n_tokens]) parser = pp.OneOrMore(pp.Or(alts))
+infix_recursive    0.0894s   0.1093s     53.9%  import random pp.ParserElement.disable_memoization() pp.ParserElement.enable_packrat(force=True) rnd = random.Random(404) ops = ["+", "-", "*", "/", "%"] n_terms = 250 terms = [] for _ in range(n_terms): t = str(rnd.randint(0, 10_000)) if rnd.random() < 0.15: t = f"({t})" terms.append(t) text = terms[0] for i in range(1, n_terms): text += f" {rnd.choice(ops)} {terms[i]}" integer = pp.Word(pp.nums) unary_addsub = pp.one_of("+ -", use_regex=False) fact = pp.one_of("!", use_regex=False) pow_op = pp.one_of("^", use_regex=False) muldiv = pp.one_of("* / %", use_regex=False) binary_addsub = pp.one_of("+ -", use_regex=False) parser = pp.infix_notation( integer, [ (unary_addsub, 1, pp.OpAssoc.RIGHT), (fact, 1, pp.OpAssoc.LEFT), (pow_op, 2, pp.OpAssoc.LEFT), (muldiv, 2, pp.OpAssoc.LEFT), (binary_addsub, 2, pp.OpAssoc.LEFT), ], )
+left_recursive     0.0260s   0.0419s     65.5%  import random pp.ParserElement.disable_memoization() pp.ParserElement.enable_left_recursion(force=True) rnd = random.Random(505) ops = ["+", "-", "*", "/", "%"] n_terms = 250 terms = [] for _ in range(n_terms): t = str(rnd.randint(0, 10_000)) if rnd.random() < 0.15: t = f"({t})" terms.append(t) text = terms[0] for i in range(1, n_terms): text += f" {rnd.choice(ops)} {terms[i]}" integer = pp.Word(pp.nums) muldiv = pp.one_of("* / %", use_regex=False) addsub = pp.one_of("+ -", use_regex=False) lpar, rpar = map(pp.Suppress, "()") E = pp.Forward("E") T = pp.Forward("T") F = integer | lpar + E + rpar T <<= T + muldiv + F | F E <<= E + addsub + T | T parser = E
+
+geometric mean of the hot file's share: 67.7%
+
+The call spans 24x between or_many_alts and left_recursive.
+
+The flat and caller profiles in the other two documents are of the first
+input only.

@@ -292,6 +292,31 @@ def _propose(
     )
 
 
+def test_repair_continues_the_saved_conversation_with_the_check_report(tmp_path: Path) -> None:
+    out, draft = _draft_dir(tmp_path)
+    _propose(out, draft, FakeChatModel([tool_call("submit_proposal", GOOD, "c1")]))
+    first = json.loads((out / "messages.json").read_text())
+    fixed = dict(GOOD, call="w.parse(text * 2)")
+    model = FakeChatModel([tool_call("submit_proposal", fixed, "c2")])
+    report = "FAIL  dense call length  0.0010s is below 5ms"
+    outcome = propose.repair(
+        model,
+        out,
+        draft,
+        load_config(TEMPLATE),
+        report,
+        when="2026-09-13 12:00:00",
+        max_turns=5,
+    )
+    sent = model.requests[0]
+    assert sent[: len(first)] == first
+    assert sent[-1]["role"] == "user" and report in sent[-1]["content"]
+    assert parse_config(outcome.text).target.call == "w.parse(text * 2)"
+    assert model.cache_keys == ["intake-widget"]
+    assert json.loads((out / "usage.json").read_text())["prompt_tokens"] == 200
+    assert len(json.loads((out / "messages.json").read_text())) == len(sent) + 2
+
+
 def test_tools_read_the_clone_and_never_leave_it(tmp_path: Path) -> None:
     out, _ = _draft_dir(tmp_path)
     repo = out / derive.REPO_DIR
@@ -326,6 +351,9 @@ def test_a_rejected_proposal_gets_its_reasons_and_an_accepted_one_loads(tmp_path
     for reason in ("inside the package", "not one expression", "2 to 12 inputs"):
         assert reason in replies["c3"]
     assert outcome.turns == 4
+    # Nothing in the text goes stale once profile and calibrate write docs and floors.
+    for stale in ("Not admitted", "noise_floor is absent", "profile writes these"):
+        assert stale not in outcome.text
 
     cfg = parse_config(outcome.text)
     t = cfg.target

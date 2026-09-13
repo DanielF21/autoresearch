@@ -76,7 +76,8 @@ def repo_name(url: str) -> str:
     return name
 
 
-def _git_env() -> dict[str, str]:
+def git_env() -> dict[str, str]:
+    """The environment with every ``GIT_`` variable removed, so a hook's cannot leak in."""
     return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
 
 
@@ -93,7 +94,7 @@ def clone(url: str, dest: Path) -> str:
         text=True,
         timeout=CLONE_TIMEOUT_S,
         check=False,
-        env=_git_env(),
+        env=git_env(),
     )
     if r.returncode != 0:
         raise IntakeError(f"git clone {url} failed: {r.stderr.strip()[-500:]}")
@@ -103,7 +104,7 @@ def clone(url: str, dest: Path) -> str:
         capture_output=True,
         text=True,
         check=False,
-        env=_git_env(),
+        env=git_env(),
     )
     sha = head.stdout.strip()
     if head.returncode != 0 or len(sha) != 40:

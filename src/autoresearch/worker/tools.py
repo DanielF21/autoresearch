@@ -250,9 +250,10 @@ TOOLS: tuple[Tool, ...] = (
         "run_benchmark",
         "Time the target on your working tree against the untouched base commit, on every "
         "benchmark input, two back to back pairs each. Reports a ratio per input plus their "
-        "geometric mean. Indicative only: noisy, and not the referee's measurement. Run it "
+        "geometric mean. Use it to check a prediction you have written down, and once "
         "before you submit: a patch that is slower on any input cannot count as a speedup, "
-        "and this is the only way to see that coming.",
+        "and this is the only way to see that coming. Indicative only: two pairs on a "
+        "shared machine, not the referee's measurement.",
         _params({}, []),
         run_benchmark,
     ),
@@ -268,9 +269,10 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         "submit",
         "Finish the attempt. The harness takes git diff of your working tree as the patch. "
-        "State the speedup you predict the referee will record, which is the geometric mean "
-        "over every input, as a ratio, for example 1.15 for 15 percent faster, and a "
-        "rationale a maintainer could read.",
+        "predicted_speedup is the geometric mean over every input that you predicted before "
+        "your first measurement, as a ratio, for example 1.15 for 15 percent faster; not the "
+        "number the benchmark showed you. The rationale is read by the next round and by a "
+        "maintainer, in the shape the instructions give: its first line names the mechanism.",
         _params(
             {"predicted_speedup": {"type": "number"}, "rationale": {"type": "string"}},
             ["predicted_speedup", "rationale"],
@@ -281,6 +283,8 @@ TOOLS: tuple[Tool, ...] = (
 
 TOOL_BY_NAME = {t.name: t for t in TOOLS}
 TOOL_SPECS = [t.spec for t in TOOLS]
+# What the model is offered on its last turn: nothing but the way to finish.
+SUBMIT_ONLY_SPECS = [TOOL_BY_NAME["submit"].spec]
 
 
 def execute(ctx: ToolContext, name: str, args: dict[str, Any]) -> ToolResult:

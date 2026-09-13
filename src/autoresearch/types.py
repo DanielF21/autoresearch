@@ -24,6 +24,7 @@ class StopReason(enum.StrEnum):
     """Why a worker attempt ended."""
 
     SUBMITTED = "submitted"
+    LAST_TURN = "last_turn"  # submitted, on the turn the harness announced as the last
     MAX_TURNS = "max_turns"
     MAX_SECONDS = "max_seconds"
     MAX_INPUT_TOKENS = "max_input_tokens"
@@ -233,6 +234,12 @@ class InputTiming:
     how long the call takes rather than of the patch. ``regresses`` is the
     mirror of ``improves``: as far below 1 as the floor is above it, so the test
     is symmetric and a slowdown has to clear the same bar a speedup does.
+
+    ``speedup`` is None when too few pairs came back clean after every retry.
+    Such an input is ``untimed``, and a measurement with one never clears the
+    noise floor: the mean over the inputs that remain says nothing about the
+    input that is missing, and the missing ones are the cheap ones where a
+    patch gains least.
     """
 
     name: str
@@ -243,6 +250,11 @@ class InputTiming:
     speedup: float | None = None
     retried: bool = False
     errors: tuple[str, ...] = ()
+    retries: int = 0
+
+    @property
+    def untimed(self) -> bool:
+        return self.speedup is None
 
     @property
     def result_matches(self) -> bool | None:
@@ -269,13 +281,18 @@ class InputTiming:
             "speedup": self.speedup,
             "improves": self.improves,
             "regresses": self.regresses,
+            "untimed": self.untimed,
             "retried": self.retried,
+            "retries": self.retries,
             "errors": list(self.errors),
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> InputTiming:
         speedup = d.get("speedup")
+        retried = bool(d.get("retried", False))
+        # Records from before the count was kept say only whether a retry happened.
+        retries = int(d.get("retries", 1 if retried else 0))
         return cls(
             name=str(d["name"]),
             noise_floor=float(d["noise_floor"]),
@@ -283,8 +300,9 @@ class InputTiming:
             patched_fp=str(d.get("patched_fp", "")),
             pairs=tuple(PairTiming.from_dict(p) for p in d.get("pairs", [])),
             speedup=None if speedup is None else float(speedup),
-            retried=bool(d.get("retried", False)),
+            retried=retried,
             errors=tuple(str(e) for e in d.get("errors", [])),
+            retries=retries,
         )
 
 
@@ -327,8 +345,8 @@ class Measurement:
     Steps that could not run leave their field empty or None and add a line to
     ``errors``. Nothing here is a decision. ``clears_noise`` is the one derived
     label: the patch applied, was in scope, passed both suites, computed the same
-    result on every input, was not slower on any of them, and was faster on at
-    least one.
+    result on every input, was timed on every input, was not slower on any of
+    them, and was faster on at least one.
 
     ``speedup`` is the geometric mean across the inputs. A geometric mean
     penalises imbalance by a squared deviation term in log space, so a patch
@@ -390,12 +408,24 @@ class Measurement:
         return all(seen)
 
     @property
+    def untimed(self) -> tuple[str, ...]:
+        """Names of inputs that produced no ratio. Empty is the bar.
+
+        The mean is taken over the inputs that did, so a missing input would
+        otherwise raise the score exactly when the patch is weakest there. The
+        width experiment's two largest recorded speedups were this: three or
+        four inputs timed, the sparse ones missing.
+        """
+        return tuple(i.name for i in self.inputs if i.untimed)
+
+    @property
     def clears_noise(self) -> bool:
         return (
             self.applied
             and not self.scope_violations
             and self.tests_pass
             and self.result_matches is True
+            and not self.untimed
             and not self.regressions
             and any(i.improves for i in self.inputs)
         )
@@ -413,6 +443,7 @@ class Measurement:
             "speedup": self.speedup,
             "worst_speedup": self.worst_speedup,
             "regressions": list(self.regressions),
+            "untimed": list(self.untimed),
             "clears_noise": self.clears_noise,
             "errors": list(self.errors),
             "provenance": self.provenance.to_dict(),

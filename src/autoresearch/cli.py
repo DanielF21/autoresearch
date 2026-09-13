@@ -2,7 +2,7 @@
 
 Local commands, which never touch Sail: ``status``, ``next``, ``intake``.
 Commands that create boxes or call the model: ``intake propose``, ``check``,
-``profile``, ``calibrate``, ``run``, ``measure``.
+``profile``, ``calibrate``, ``run``, ``measure``, ``scribe``, and ``auto --yes``.
 Control box commands: ``deploy``, ``launch``, ``remote-status``, ``fetch``,
 and ``release-control``, which a launch runs after its run ends.
 The backstop for a process that died without cleanup: ``reap``.
@@ -15,8 +15,14 @@ decision: ``intake`` clones and derives a draft for free; ``intake propose``
 has one model conversation choose the call and inputs and writes the config;
 ``check`` admits it on one referee box against ``referee/admissibility.py``;
 ``profile`` writes the worker's documents from one referee box; ``calibrate``
-writes the noise floors from one referee box; then ``run``. ``next`` says
-which step a config is at. Nothing runs the next step for you.
+writes the noise floors from one referee box; then ``run``; then ``scribe``
+writes the pull request. ``next`` says which step a config is at.
+
+``auto <url>`` runs that whole order. Without ``--yes`` it takes the repository
+in for free, prints what every later step creates, and stops. With ``--yes`` it
+runs each step in turn, reading the stage from disk before each one, so a second
+invocation resumes where the first stopped. A failed check goes back to the
+proposing conversation with its report, at most twice. See ``pipeline``.
 
 Every command is a function taking parsed arguments, so the wiring is testable
 without a subprocess.
@@ -31,7 +37,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from autoresearch import env, history, shutdown
+from autoresearch import env, history, pipeline, shutdown
 from autoresearch.config import RunConfig, load_config
 from autoresearch.orchestrator import status as status_mod
 
@@ -173,8 +179,11 @@ def cmd_check(args: argparse.Namespace) -> int:
         if not args.keep:
             box.terminate()
             print("box terminated", flush=True)
-    verdicts = admissibility.judge(cfg.target, survey, cfg.referee.repeats_per_launch)
-    print(admissibility.render(cfg.target, survey, verdicts))
+    verdicts = admissibility.judge(
+        cfg.target, survey, cfg.referee.repeats_per_launch, cfg.referee.pairs
+    )
+    report = admissibility.render(cfg.target, survey, verdicts)
+    print(report)
     out_dir = Path(args.out) / "check"
     out_dir.mkdir(parents=True, exist_ok=True)
     record = {
@@ -187,6 +196,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         "tests": [t.to_dict() for t in survey.tests],
         "errors": list(survey.errors),
         "verdicts": [v.__dict__ for v in verdicts],
+        "report": report,
     }
     (out_dir / f"{ts}.json").write_text(json.dumps(record, indent=2) + "\n")
     print(f"\nrecord: {out_dir / f'{ts}.json'}")
@@ -210,7 +220,7 @@ def _intake_clone(args: argparse.Namespace) -> int:
     from autoresearch.intake import derive, scope
 
     url = args.what
-    template = _load(args.template)
+    template = _shaped(_load(args.template), args)
     try:
         out = Path(args.root) / scope.repo_name(url)
         repo = out / derive.REPO_DIR
@@ -247,7 +257,17 @@ def _intake_clone(args: argparse.Namespace) -> int:
     return 0
 
 
-def _intake_propose(args: argparse.Namespace) -> int:
+def _shaped(template: RunConfig, args: argparse.Namespace) -> RunConfig:
+    """The template with ``--width`` and ``--rounds`` applied where given."""
+    from dataclasses import replace
+
+    width = getattr(args, "width", 0) or template.width
+    rounds = getattr(args, "rounds", 0) or template.rounds
+    return replace(template, width=width, rounds=rounds)
+
+
+def _intake_propose(args: argparse.Namespace, report: str = "") -> int:
+    """A proposal from a new conversation, or with ``report``, the saved one continued."""
     from dataclasses import replace
 
     from autoresearch.intake import derive, propose
@@ -260,7 +280,7 @@ def _intake_propose(args: argparse.Namespace) -> int:
     except (OSError, ValueError, KeyError) as e:
         print(f"no draft in {out}: {e}", file=sys.stderr)
         return 2
-    template = _load(draft.template)
+    template = _shaped(_load(draft.template), args)
     config_path = Path(args.configs) / f"{draft.run_id}.toml"
     if config_path.exists():
         print(f"{config_path} exists; move it aside first. No model was called.", file=sys.stderr)
@@ -268,20 +288,32 @@ def _intake_propose(args: argparse.Namespace) -> int:
     env.load_dotenv()
     worker = replace(template.worker, model=args.model or template.worker.model)
     when = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    verb = "repairing the proposal" if report else "proposing"
     print(
-        f"proposing for {draft.name} with {worker.model}, at most {args.max_turns} replies",
+        f"{verb} for {draft.name} with {worker.model}, at most {args.max_turns} replies",
         flush=True,
     )
     try:
-        outcome = propose.propose(
-            SailChatModel(worker),
-            out,
-            draft,
-            template,
-            (out / derive.BRIEF_FILE).read_text(),
-            when=when,
-            max_turns=args.max_turns,
-        )
+        if report:
+            outcome = propose.repair(
+                SailChatModel(worker),
+                out,
+                draft,
+                template,
+                report,
+                when=when,
+                max_turns=args.max_turns,
+            )
+        else:
+            outcome = propose.propose(
+                SailChatModel(worker),
+                out,
+                draft,
+                template,
+                (out / derive.BRIEF_FILE).read_text(),
+                when=when,
+                max_turns=args.max_turns,
+            )
     except (ModelError, propose.ProposeError) as e:
         print(f"stopped: {e}\nmessages and usage: {out}", file=sys.stderr)
         return 1
@@ -448,47 +480,29 @@ def cmd_calibrate(args: argparse.Namespace) -> int:
 
 def cmd_next(args: argparse.Namespace) -> int:
     """Which step a target is at, and the one command that comes next. Free."""
-    from autoresearch.referee import admissibility
+    from autoresearch.pipeline import Stage, config_stage
 
     cfg = _load(args.config)
-    target = cfg.target
-    wanted = admissibility.admission_hash(target)
-    matching: list[tuple[Path, dict[str, object]]] = []
-    for p in sorted((Path(args.out) / "check").glob("*.json")):
-        try:
-            rec = json.loads(p.read_text())
-        except (OSError, ValueError):
-            continue
-        if rec.get("sha") == target.sha and rec.get("target_hash") == wanted:
-            matching.append((p, rec))
-
+    found = config_stage(cfg, Path(args.out), Path(args.repo_root))
     referee = f"1 referee box, size {cfg.boxes.referee_size}, no model call"
 
     def say(stage: str, command: str, creates: str) -> int:
         print(f"stage:   {stage}\nnext:    {command}\ncreates: {creates}")
         return 0
 
-    if not matching:
+    if found.stage is Stage.NOT_CHECKED:
         return say("not checked", f"autoresearch check {args.config}", referee)
-    path, rec = matching[-1]
-    verdicts = rec.get("verdicts")
-    failed = [
-        str(v.get("rule"))
-        for v in (verdicts if isinstance(verdicts, list) else [])
-        if isinstance(v, dict) and v.get("level") == "fail"
-    ]
-    if failed:
+    if found.stage is Stage.CHECK_FAILED:
         print(
-            f"stage:   check failed in {path}: {', '.join(failed)}\n"
+            f"stage:   check failed in {found.record}: {', '.join(found.failed)}\n"
             "next:    change the config and check again, or drop the target"
         )
         return 1
-    root = Path(args.repo_root)
-    if not target.docs or any(not (root / d).is_file() for d in target.docs):
-        return say(f"checked in {path}", f"autoresearch profile {args.config}", referee)
-    if target.uncalibrated:
+    if found.stage is Stage.NEEDS_PROFILE:
+        return say(f"checked in {found.record}", f"autoresearch profile {args.config}", referee)
+    if found.stage is Stage.NEEDS_CALIBRATE:
         return say(
-            f"profiled; no floor for {', '.join(target.uncalibrated)}",
+            f"profiled; no floor for {', '.join(found.uncalibrated)}",
             f"autoresearch calibrate {args.config} --rounds 7",
             referee,
         )
@@ -499,6 +513,118 @@ def cmd_next(args: argparse.Namespace) -> int:
         f"boxes (size {cfg.boxes.referee_size}); {cfg.width} model attempts per round "
         f"with {cfg.worker.model}",
     )
+
+
+def cmd_scribe(args: argparse.Namespace) -> int:
+    """Pick a finished run's candidate and write its pull request. One model conversation."""
+    from autoresearch.scribe import cli as scribe_cli
+
+    argv = [args.run_dir, "--n", str(args.n), "--out", args.out]
+    for flag, value in (
+        ("--repo", args.repo),
+        ("--prs", args.prs),
+        ("--model", args.model),
+        ("--source", args.source),
+    ):
+        if value:
+            argv += [flag, value]
+    return scribe_cli.main(argv)
+
+
+def _auto_steps() -> pipeline.Steps:
+    """Each stage of ``auto`` as the command that does it alone, with its arguments built."""
+    from autoresearch.intake.derive import REPO_DIR
+    from autoresearch.orchestrator.run import RunError
+    from autoresearch.scribe import cli as scribe_cli
+
+    def intake(ctx: pipeline.Context) -> int:
+        return _intake_clone(
+            argparse.Namespace(
+                what=ctx.url,
+                template=str(ctx.template),
+                package=ctx.package,
+                root=str(ctx.intake_root),
+                width=ctx.width,
+                rounds=ctx.rounds,
+                max_turns=pipeline.PROPOSE_TURNS,
+            )
+        )
+
+    def proposal(ctx: pipeline.Context, report: str = "") -> int:
+        ns = argparse.Namespace(
+            draft=str(ctx.draft_dir),
+            configs=str(ctx.configs),
+            model="",
+            max_turns=pipeline.PROPOSE_TURNS,
+            width=ctx.width,
+            rounds=ctx.rounds,
+        )
+        return _intake_propose(ns, report)
+
+    def config(ctx: pipeline.Context) -> str:
+        return str(ctx.config_path())
+
+    def run(ctx: pipeline.Context) -> int:
+        ns = argparse.Namespace(
+            config=config(ctx),
+            runs_root=str(ctx.runs_root),
+            repo_root=str(ctx.repo_root),
+            until=None,
+        )
+        try:
+            return cmd_run(ns)
+        except RunError as e:
+            print(f"run stopped: {e}", file=sys.stderr)
+            return 1
+
+    return pipeline.Steps(
+        intake=intake,
+        propose=proposal,
+        repair=proposal,
+        check=lambda ctx: cmd_check(
+            argparse.Namespace(config=config(ctx), out=str(ctx.runs_root), keep=False)
+        ),
+        profile=lambda ctx: cmd_profile(
+            argparse.Namespace(
+                config=config(ctx), docs_root=str(ctx.docs_root), no_write=False, keep=False
+            )
+        ),
+        calibrate=lambda ctx: cmd_calibrate(
+            argparse.Namespace(
+                config=config(ctx),
+                rounds=pipeline.CALIBRATE_ROUNDS,
+                skip=[],
+                out=str(ctx.calibration_out),
+                no_write=False,
+                keep=False,
+            )
+        ),
+        run=run,
+        scribe=lambda ctx: scribe_cli.main(
+            [
+                str(ctx.run_dir()),
+                "--source",
+                str(ctx.draft_dir / REPO_DIR),
+                "--out",
+                str(ctx.scribe_root),
+            ]
+        ),
+    )
+
+
+def cmd_auto(args: argparse.Namespace) -> int:
+    """A repository URL to a patch and a pull request, every step in order, resumable."""
+    ctx = pipeline.Context(
+        url=args.url,
+        width=args.width,
+        rounds=args.rounds,
+        template=Path(args.template),
+        package=args.package,
+        intake_root=Path(args.root),
+    )
+    if args.yes:
+        env.load_dotenv()
+    return pipeline.auto(ctx, _auto_steps(), yes=args.yes, until=args.until)
 
 
 def cmd_reap(args: argparse.Namespace) -> int:
@@ -586,7 +712,43 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-turns", type=int, default=40, help="propose only: replies before giving up"
     )
     p.add_argument("--configs", default="configs", help="propose only: where the config is written")
+    p.add_argument("--width", type=int, default=0, help="run width; default the template's")
+    p.add_argument("--rounds", type=int, default=0, help="propose only: default the template's")
     p.set_defaults(func=cmd_intake)
+
+    p = sub.add_parser(
+        "auto",
+        help="a repository URL to a patch and a pull request: every step in order; "
+        "prints the plan and spends nothing without --yes",
+    )
+    p.add_argument("url")
+    p.add_argument("--width", type=int, required=True, help="worker attempts per round")
+    p.add_argument("--rounds", type=int, required=True, help="rounds in the run")
+    p.add_argument("--yes", action="store_true", help="create the boxes and call the model")
+    p.add_argument(
+        "--until",
+        default="",
+        choices=["", *pipeline.UNTIL],
+        help="stop once this stage is reached: config, admitted, calibrated, run",
+    )
+    p.add_argument("--package", default="", help="the package, when the repo has several")
+    p.add_argument(
+        "--template", default="configs/t1_w4d.toml", help="source of every non target section"
+    )
+    p.add_argument("--root", default="runs/auto", help="where clones and drafts go")
+    p.set_defaults(func=cmd_auto)
+
+    p = sub.add_parser(
+        "scribe", help="pick a finished run's candidate and write its pull request (model call)"
+    )
+    p.add_argument("run_dir")
+    p.add_argument("--repo", default="", help="owner/name; default: the run's target repo")
+    p.add_argument("--n", type=int, default=20, help="merged pull requests to show")
+    p.add_argument("--prs", default="", help="a saved prs.json to reuse instead of fetching")
+    p.add_argument("--model", default="", help="default: the run's worker model")
+    p.add_argument("--out", default="runs/scribe")
+    p.add_argument("--source", default="", help="a checkout at the run's sha")
+    p.set_defaults(func=cmd_scribe)
 
     p = sub.add_parser(
         "profile", help="profile every input on one referee box and write the worker's documents"

@@ -1,0 +1,24 @@
+cProfile of parser.parse_string(text, parse_all=True) with import random pp.ParserElement.disable_memoization() rnd = random.Random(101) rows = 3500 cols = 8 lines = [] for _ in range(rows): lines.append(",".join(f"v{rnd.randint(0, 10_000)}" for _ in range(cols))) text = "\n".join(lines) field = pp.Word(pp.alphanums) row = pp.DelimitedList(field) parser = pp.OneOrMore(row)
+at pyparsing efd56db4e59f, the base commit for every attempt.
+         1519148 function calls (1337143 primitive calls) in 0.660 seconds
+
+   Ordered by: internal time
+   List reduced from 60 to 14 due to restriction <14>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+ 122507/2    0.257    0.000    0.659    0.330 pyparsing/core.py:928(_parseNoCache)
+   112004    0.073    0.000    0.111    0.000 pyparsing/results.py:170(__new__)
+31502/3502    0.047    0.000    0.626    0.000 pyparsing/core.py:4618(parseImpl)
+   112004    0.036    0.000    0.054    0.000 pyparsing/results.py:194(__init__)
+   269524    0.034    0.000    0.036    0.000 {built-in method builtins.isinstance}
+    52500    0.029    0.000    0.041    0.000 pyparsing/results.py:549(__iadd__)
+    59505    0.025    0.000    0.031    0.000 pyparsing/core.py:909(preParse)
+   3501/1    0.024    0.000    0.659    0.659 pyparsing/core.py:5692(parseImpl)
+   182016    0.020    0.000    0.020    0.000 {built-in method builtins.len}
+   112006    0.017    0.000    0.017    0.000 pyparsing/util.py:500(deprecate_argument)
+    28001    0.015    0.000    0.030    0.000 pyparsing/core.py:3383(parseImpl_regex)
+31501/3501    0.015    0.000    0.639    0.000 pyparsing/core.py:5167(parseImpl)
+    77006    0.011    0.000    0.011    0.000 {built-in method __new__ of type object at 0x144d380}
+    28001    0.010    0.000    0.010    0.000 {method 'match' of 're.Pattern' objects}
+
+

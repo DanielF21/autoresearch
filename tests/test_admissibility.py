@@ -47,35 +47,35 @@ def _levels(verdicts: tuple[adm.Verdict, ...]) -> dict[str, str]:
 
 
 def test_a_target_that_meets_every_rule_is_admissible(config: RunConfig) -> None:
-    verdicts = adm.judge(config.target, _good(), 7)
+    verdicts = adm.judge(config.target, _good(), 7, 6)
     assert not any(v.failed for v in verdicts)
     assert "admissible" in adm.render(config.target, _good(), verdicts).splitlines()[-1]
 
 
 def test_an_input_that_cannot_run_fails_by_name(config: RunConfig) -> None:
     survey = replace(_good(), inputs=(_input("a"), InputSurvey("b", error="ImportError: x")))
-    levels = _levels(adm.judge(config.target, survey, 7))
+    levels = _levels(adm.judge(config.target, survey, 7, 6))
     assert levels["a runs"] == "pass" and levels["b runs"] == "fail"
     assert "b hot file executes" not in levels  # nothing else is judged for it
 
 
 def test_a_hot_file_that_did_not_execute_fails(config: RunConfig) -> None:
     survey = replace(_good(), inputs=(_input("a", hot_executed=False),))
-    verdicts = adm.judge(config.target, survey, 7)
+    verdicts = adm.judge(config.target, survey, 7, 6)
     assert _levels(verdicts)["a hot file executes"] == "fail"
     assert config.target.hot_file in next(v.detail for v in verdicts if v.failed)
 
 
 def test_a_small_hot_share_warns_but_does_not_fail(config: RunConfig) -> None:
     survey = replace(_good(), inputs=(_input("a", hot_share=0.1),))
-    verdicts = adm.judge(config.target, survey, 7)
+    verdicts = adm.judge(config.target, survey, 7, 6)
     assert _levels(verdicts)["a hot file executes"] == "warn"
     assert not any(v.failed for v in verdicts)
 
 
 def test_a_result_that_differs_between_two_launches_fails(config: RunConfig) -> None:
     survey = replace(_good(), inputs=(_input("a", fingerprints=("abc", "abd")),))
-    verdicts = adm.judge(config.target, survey, 7)
+    verdicts = adm.judge(config.target, survey, 7, 6)
     assert _levels(verdicts)["a deterministic"] == "fail"
 
 
@@ -85,20 +85,34 @@ def test_the_call_must_sit_inside_the_band_one_launch_can_time(config: RunConfig
     short = replace(_good(), inputs=(_input("a", call_s=0.001),))
     long = replace(_good(), inputs=(_input("a", call_s=limit + 1),))
     edge = replace(_good(), inputs=(_input("a", call_s=limit - 1),))
-    assert _levels(adm.judge(config.target, short, 7))["a call length"] == "fail"
-    assert _levels(adm.judge(config.target, long, 7))["a call length"] == "fail"
-    assert _levels(adm.judge(config.target, edge, 7))["a call length"] == "pass"
+    assert _levels(adm.judge(config.target, short, 7, 6))["a call length"] == "fail"
+    assert _levels(adm.judge(config.target, long, 7, 6))["a call length"] == "fail"
+    assert _levels(adm.judge(config.target, edge, 7, 6))["a call length"] == "pass"
     # Fewer repeats per launch leave room for a longer call.
-    assert _levels(adm.judge(config.target, long, 3))["a call length"] == "pass"
+    assert _levels(adm.judge(config.target, long, 3, 6))["a call length"] == "pass"
+
+
+def test_the_timing_one_attempt_costs_must_fit_the_budget(config: RunConfig) -> None:
+    # Six pairs of two launches of seven 0.5 s calls after 0.3 s of start: 45.6 s an input.
+    assert adm.timing_per_attempt_s(_good(), 6, 7) == pytest.approx({"a": 45.6, "b": 45.6})
+    verdicts = adm.judge(config.target, _good(), 7, 6)
+    assert _levels(verdicts)["referee time per attempt"] == "pass"
+    slow = replace(_good(), inputs=(_input("a"), _input("slow", call_s=20.0)))
+    verdicts = adm.judge(config.target, slow, 7, 6)
+    assert _levels(verdicts)["referee time per attempt"] == "fail"
+    detail = next(v.detail for v in verdicts if v.rule == "referee time per attempt")
+    assert detail.index("slow") < detail.index("a 46s") and "smaller or drop them" in detail
+    broken = replace(_good(), inputs=(InputSurvey("b", error="ImportError: x"),))
+    assert "referee time per attempt" not in _levels(adm.judge(config.target, broken, 7, 6))
 
 
 def test_both_suites_must_pass_and_fit_the_timeout(config: RunConfig) -> None:
     failing = replace(_good(), tests=(_suite("module"), _suite("full", ok=False)))
-    assert _levels(adm.judge(config.target, failing, 7))["full suite"] == "fail"
+    assert _levels(adm.judge(config.target, failing, 7, 6))["full suite"] == "fail"
     slow = replace(_good(), tests=(_suite("module"), _suite("full", duration_s=TESTS_TIMEOUT)))
-    assert _levels(adm.judge(config.target, slow, 7))["full suite"] == "fail"
+    assert _levels(adm.judge(config.target, slow, 7, 6))["full suite"] == "fail"
     missing = replace(_good(), tests=(_suite("module"),), errors=("full tests: guest died",))
-    verdicts = adm.judge(config.target, missing, 7)
+    verdicts = adm.judge(config.target, missing, 7, 6)
     assert _levels(verdicts)["full suite"] == "fail"
     assert "guest died" in next(v.detail for v in verdicts if v.rule == "full suite")
 
@@ -107,10 +121,10 @@ def test_one_suite_named_twice_warns_and_uncalibrated_inputs_are_noted(
     config: RunConfig,
 ) -> None:
     same = replace(config.target, tests=SuitePaths("tests", "tests"))
-    assert _levels(adm.judge(same, _good(), 7))["two suites"] == "warn"
+    assert _levels(adm.judge(same, _good(), 7, 6))["two suites"] == "warn"
     first, *rest = config.target.inputs
     bare = replace(config.target, inputs=(replace(first, noise_floor=None), *rest))
-    verdicts = adm.judge(bare, _good(), 7)
+    verdicts = adm.judge(bare, _good(), 7, 6)
     assert _levels(verdicts)["noise floors"] == "note"
     assert first.name in next(v.detail for v in verdicts if v.rule == "noise floors")
     assert not any(v.failed for v in verdicts)
@@ -118,7 +132,7 @@ def test_one_suite_named_twice_warns_and_uncalibrated_inputs_are_noted(
 
 def test_render_names_every_failed_rule_and_the_verdict(config: RunConfig) -> None:
     survey = replace(_good(), inputs=(_input("a", hot_executed=False),))
-    verdicts = adm.judge(config.target, survey, 7)
+    verdicts = adm.judge(config.target, survey, 7, 6)
     text = adm.render(config.target, survey, verdicts)
     assert "FAIL  a hot file executes" in text
     assert text.splitlines()[-1].startswith("not admissible: 1 rule(s) failed")

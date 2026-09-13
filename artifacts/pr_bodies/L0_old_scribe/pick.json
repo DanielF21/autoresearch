@@ -1,0 +1,4 @@
+{
+  "attempt": 2,
+  "reasons": "Attempt 2 is the most mergeable. It is a 28-line change with no size threshold, no new imports, and no reliance on newer Python features such as int.bit_count. It preserves arbitrary node labels and only changes the nodes=None path, leaving the explicit subset path unchanged. A maintainer reads one simple transformation: cache each node's predecessor/successor union and reciprocal sets once, then count the four directed-triangle intersections with four `len(set & set)` operations instead of rebuilding `set(G._pred[j])` and `set(G._succ[j])` for every neighbor and summing through a Python generator. The bitset candidates are faster but carry magic thresholds, big-int memory risk (and no size cap in some patches), global mutable caches or exception-based control flow, and fragile integer-label restrictions that a maintainer would be less likely to accept."
+}

@@ -20,6 +20,7 @@ from autoresearch.types import (
     SuiteResult,
     Usage,
 )
+from autoresearch.worker import prompt
 from autoresearch.worker.agent_loop import AgentLoopWorker
 from autoresearch.worker.protocol import WorkerInput
 from tests.helpers import BASE_SHA
@@ -173,32 +174,100 @@ def test_history_is_rendered_and_uploaded(config: RunConfig) -> None:
     assert "attempt 0002" in content
 
     # It does not carry the attempts themselves. Rendering every diff into every
-    # turn is what the filesystem exists to avoid.
+    # turn is what the filesystem exists to avoid. The rationale's first line is
+    # the one exception: it is the mechanism column of the index.
     assert "+b" not in content
-    assert "tried caching" not in content
+    assert "tests failed" in content and content.count("tried caching") == 1
 
     # The raw artifacts are on disk instead: the diff, the measurement, and the
-    # earlier worker's own words. No harness written summary.
+    # earlier worker's own words first, then the prediction. No harness written
+    # summary.
     files = boxes[0].files
     assert files[f"{HISTORY_DIR}/0001/patch.diff"] == DIFF.encode()
     assert f"{HISTORY_DIR}/0001/measurement.json" in files
-    assert b"tried caching" in files[f"{HISTORY_DIR}/0001/rationale.md"]
+    assert files[f"{HISTORY_DIR}/0001/rationale.md"].startswith(b"tried caching")
     assert b"1.50x" in files[f"{HISTORY_DIR}/0001/rationale.md"]
     assert not any(p.endswith("summary.md") for p in files)
 
 
-def test_max_turns_cap_collects_the_diff_so_far(config: RunConfig) -> None:
-    cfg = load_config(ROOT / "configs" / "t1_w4d.toml")
+def test_the_last_turn_is_announced_and_a_shell_call_on_it_ends_with_the_cap(
+    config: RunConfig,
+) -> None:
     from dataclasses import replace
 
-    cfg = replace(cfg, worker=replace(cfg.worker, max_turns=2))
+    cfg = replace(config, worker=replace(config.worker, max_turns=2))
     factory = FakeBoxFactory(prepare=prepare)
-    model = FakeChatModel(script=[tool_call("shell", {"cmd": "cat -n x"}) for _ in range(5)])
+    model = FakeChatModel(script=[tool_call("shell", {"cmd": f"cat -n x{i}"}) for i in range(5)])
     out = AgentLoopWorker(model, factory, cfg).attempt(make_input(cfg))
     assert out.stop_reason == StopReason.MAX_TURNS
     assert out.turns == 2
-    assert out.patch == DIFF
+    assert out.patch == DIFF and out.rationale == ""
     assert factory.created[0].terminated
+    # Turn 1 had every tool and no warning; turn 2 was told it was the last and
+    # offered nothing but submit. The worker was never told how many turns it had.
+    assert model.offered[0] == ["run_tests", "run_benchmark", "shell", "submit"]
+    assert model.offered[1] == ["submit"]
+    assert not any("last turn" in m.get("content", "") for m in model.requests[0])
+    assert model.requests[1][-1] == {"role": "user", "content": prompt.LAST_TURN}
+    assert "2 turns" not in model.requests[0][0]["content"]
+    # The shell call it made instead was not run.
+    assert not any("cat -n x1" in c for c in factory.created[0].commands)
+    kinds = [json.loads(line) for line in out.transcript.splitlines()]
+    assert any(k["kind"] == "last_turn" and k["cap"] == "max_turns" for k in kinds)
+    assert any(k.get("result") == "not run: last turn" for k in kinds)
+
+
+def test_the_system_message_is_the_slots_prompt_version(config: RunConfig) -> None:
+    from dataclasses import replace
+
+    factory = FakeBoxFactory(prepare=prepare)
+    model = FakeChatModel(script=submit_script())
+    inp = replace(make_input(config), prompt="v2")
+    out = AgentLoopWorker(model, factory, config).attempt(inp)
+    assert out.stop_reason == StopReason.SUBMITTED
+    system = model.requests[0][0]["content"]
+    assert "Your job in particular is to depart" in system and "Python 3.12.4" in system
+
+
+def test_a_submit_on_the_last_turn_is_recorded_as_last_turn(config: RunConfig) -> None:
+    from dataclasses import replace
+
+    cfg = replace(config, worker=replace(config.worker, max_turns=2))
+    factory = FakeBoxFactory(prepare=prepare)
+    model = FakeChatModel(
+        script=[
+            tool_call("shell", {"cmd": "sed -i s/a/b/ networkx/algorithms/cluster.py"}),
+            tool_call("submit", {"predicted_speedup": 1.1, "rationale": "Hoist the set."}),
+        ]
+    )
+    out = AgentLoopWorker(model, factory, cfg).attempt(make_input(cfg))
+    assert out.stop_reason == StopReason.LAST_TURN
+    assert out.turns == 2
+    assert out.patch == DIFF
+    assert out.prediction == Prediction(1.1) and out.rationale == "Hoist the set."
+
+
+def test_the_time_cap_announces_the_last_turn_too(config: RunConfig) -> None:
+    from dataclasses import replace
+
+    cfg = replace(config, worker=replace(config.worker, max_seconds=0))
+    factory = FakeBoxFactory(prepare=prepare)
+    model = FakeChatModel(
+        script=[tool_call("submit", {"predicted_speedup": 1.0, "rationale": "Nothing yet."})]
+    )
+    out = AgentLoopWorker(model, factory, cfg).attempt(make_input(cfg))
+    assert out.stop_reason == StopReason.LAST_TURN and out.turns == 1
+    assert model.offered == [["submit"]]
+    kinds = [json.loads(line) for line in out.transcript.splitlines()]
+    assert any(k["kind"] == "last_turn" and k["cap"] == "max_seconds" for k in kinds)
+
+
+def test_the_time_margin_is_a_few_median_turns() -> None:
+    from autoresearch.worker.agent_loop import _time_margin
+
+    assert _time_margin([]) == 0.0
+    assert _time_margin([10.0]) == 20.0
+    assert _time_margin([1.0, 100.0, 3.0]) == 6.0
 
 
 def test_max_input_tokens_cap(config: RunConfig) -> None:

@@ -25,6 +25,7 @@ class WorkerInput:
     history: tuple[Attempt, ...]
     docs: tuple[tuple[str, str], ...]
     cache_key: str
+    prompt: str = "v1"  # the system prompt version this slot runs with
 
 
 class Worker(Protocol):

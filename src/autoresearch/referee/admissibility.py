@@ -37,6 +37,12 @@ CALL_MIN_S = 0.005
 # Headroom under the launch timeout for interpreter start, import and setup.
 LAUNCH_HEADROOM_S = 40.0
 HOT_SHARE_WARN = 0.2
+# Chosen, not measured: seconds of timing launches one attempt may cost the referee.
+# The estimate uses call times under cProfile, which run slower than plain calls.
+# Networkx's five inputs take about 2.3 s a call plainly (t1_w4d base medians), about
+# 200 s per attempt, so they fit even at several times that under cProfile.
+# Calibration times seven attempts' worth of pairs, so this also bounds it.
+REFEREE_TIMING_BUDGET_S = 1200.0
 
 
 @dataclass(frozen=True)
@@ -69,7 +75,27 @@ def call_max_s(repeats_per_launch: int) -> float:
     return (LAUNCH_TIMEOUT - LAUNCH_HEADROOM_S) / repeats_per_launch
 
 
-def judge(target: TargetSpec, survey: Survey, repeats_per_launch: int) -> tuple[Verdict, ...]:
+def timing_per_attempt_s(survey: Survey, pairs: int, repeats_per_launch: int) -> dict[str, float]:
+    """Seconds of timing launches one attempt costs on each input that runs.
+
+    Each pair launches the base and the patched tree once, and each launch makes
+    ``repeats_per_launch`` calls after its fixed start cost.
+    """
+    return {
+        i.name: pairs
+        * 2
+        * (
+            repeats_per_launch * i.call_s
+            + (i.fixed_s if i.fixed_s is not None else i.import_s + i.setup_s)
+        )
+        for i in survey.inputs
+        if not i.error
+    }
+
+
+def judge(
+    target: TargetSpec, survey: Survey, repeats_per_launch: int, pairs: int
+) -> tuple[Verdict, ...]:
     out: list[Verdict] = []
     limit = call_max_s(repeats_per_launch)
 
@@ -130,6 +156,28 @@ def judge(target: TargetSpec, survey: Survey, repeats_per_launch: int) -> tuple[
             )
         else:
             out.append(Verdict(f"{i.name} call length", "pass", f"{i.call_s:.4f}s"))
+
+    times = timing_per_attempt_s(survey, pairs, repeats_per_launch)
+    if times:
+        total = sum(times.values())
+        slowest = ", ".join(
+            f"{name} {s:.0f}s" for name, s in sorted(times.items(), key=lambda kv: -kv[1])[:3]
+        )
+        basis = (
+            f"about {total:.0f}s of timing per attempt, {pairs} pairs of {repeats_per_launch} "
+            f"calls per tree on each input, from call times under cProfile; slowest: {slowest}"
+        )
+        if total > REFEREE_TIMING_BUDGET_S:
+            out.append(
+                Verdict(
+                    "referee time per attempt",
+                    "fail",
+                    f"{basis}. That exceeds {REFEREE_TIMING_BUDGET_S:.0f}s; make the slowest "
+                    "inputs smaller or drop them",
+                )
+            )
+        else:
+            out.append(Verdict("referee time per attempt", "pass", basis))
 
     seen = {t.scope: t for t in survey.tests}
     for scope in ("module", "full"):

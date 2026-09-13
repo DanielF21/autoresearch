@@ -84,6 +84,9 @@ def run_round(
     first_number = history.next_attempt_number(paths)
     seen_hashes = {normalised_hash(a.patch): a.ref.dirname for a in past if a.patch}
 
+    # Slot w runs prompt version prompts[w % len(prompts)]. The cache key carries
+    # the version, since each version is its own cached prefix.
+    versions = config.worker.prompts
     inputs = [
         WorkerInput(
             ref=AttemptRef(number=first_number + w, round=round_no, worker=w),
@@ -91,7 +94,8 @@ def run_round(
             target=target,
             history=past,
             docs=docs,
-            cache_key=f"{config.run_id}-{config.config_hash}",
+            cache_key=f"{config.run_id}-{config.config_hash}-{versions[w % len(versions)]}",
+            prompt=versions[w % len(versions)],
         )
         for w in range(config.width)
     ]
@@ -123,6 +127,7 @@ def run_round(
                 "config_hash": config.config_hash,
                 "history_numbers": [a.ref.number for a in past],
                 "cache_key": inp.cache_key,
+                "prompt": inp.prompt,
             },
             out,
             out.transcript,

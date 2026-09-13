@@ -115,7 +115,7 @@ def render(draft: Draft, proposal: Proposal, template: RunConfig, when: str) -> 
     """The config text. Raises RenderError unless it parses back to exactly what was meant."""
     t = target_spec(draft, proposal)
     lines = [
-        f"# {draft.name}: written by autoresearch intake propose at {when}. Not admitted yet.",
+        f"# {draft.name}: written by autoresearch intake propose at {when}.",
         f"# Run `autoresearch next configs/{draft.run_id}.toml` for the step it is at.",
         "#",
         *_comment(proposal.axis, "input axis: "),
@@ -139,7 +139,7 @@ def render(draft: Draft, proposal: Proposal, template: RunConfig, when: str) -> 
         f"allow = {_list(t.allow)}",
         f"deny = {_list(t.deny)}",
         f"fingerprint = {_s(t.fingerprint)}",
-        "docs = []                     # autoresearch profile writes these",
+        "docs = []",
         "",
         "[target.tests]",
         f"module = {_s(t.tests.module)}",
@@ -153,7 +153,6 @@ def render(draft: Draft, proposal: Proposal, template: RunConfig, when: str) -> 
             "[[target.inputs]]",
             f"name = {_s(proposed.name)}",
             f"setup = {_setup_value(proposed.setup)}",
-            "# noise_floor is absent until autoresearch calibrate has measured it",
         ]
     w, r, b, st, ob = (
         template.worker,

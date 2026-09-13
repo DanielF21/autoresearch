@@ -104,10 +104,29 @@ any target:
    grade on; above it `repeats_per_launch` calls do not fit inside one launch timeout.
 6. **Both suites pass on the base commit and finish inside the referee's timeout**, 1200
    seconds with four xdist workers for the full suite.
+   The timing launches one attempt costs, summed over every input, must also fit 1200
+   seconds, which bounds calibration as well; `check` estimates it from the call times.
 7. **Dependencies installable by pip or apt on Debian.**
 
-The order for a new target. Each step is its own command, so each cost is its own
-decision, and nothing runs the next step for you:
+One command runs every step for a new target, from its URL to a patch and a pull
+request description:
+
+```
+uv run autoresearch auto <github url> --width 4 --rounds 2                            # free: clone, draft, print the plan
+uv run autoresearch auto <github url> --width 4 --rounds 2 --yes --until calibrated   # admission only
+uv run autoresearch auto <github url> --width 4 --rounds 2 --yes                      # everything, or resume
+```
+
+Without `--yes` it takes the repository in, prints every box and model call the later
+steps create, and spends nothing. With `--yes` it reads the stage from disk before each
+step, so running it again resumes where it stopped. A failed `check` goes back to the
+proposing conversation with the check's report, at most twice; each rejected config is
+kept in `runs/auto/<name>/rejected/`. A step that leaves the stage unchanged, such as a
+calibration that leaves an input without a floor, stops the command. `--until` takes
+`config`, `admitted`, `calibrated` or `run`. The result is
+`runs/scribe/<run_id>/<timestamp>/pr.md` and `patch.diff`; nothing is sent to GitHub.
+
+The same order, one command per step, so each cost is its own decision:
 
 ```
 uv run autoresearch intake <github url>                  # free: clone, judge scope, draft metadata and a brief
@@ -116,6 +135,7 @@ uv run autoresearch check configs/<run_id>.toml          # one referee box, no m
 uv run autoresearch profile configs/<run_id>.toml        # one referee box, no model: the worker's documents
 uv run autoresearch calibrate configs/<run_id>.toml      # one referee box, no model: the noise floors
 uv run autoresearch run configs/<run_id>.toml --until 1
+uv run autoresearch scribe runs/<run_id>                 # one model conversation: pick an attempt, write its PR
 uv run autoresearch next configs/<run_id>.toml           # free: which step a config is at, what the next creates
 ```
 
@@ -123,11 +143,20 @@ uv run autoresearch next configs/<run_id>.toml           # free: which step a co
 is not a Python project, has a compiled build, has no package at `.` or `src/`, or has no
 tests. `intake propose` gives the model read only tools over the clone and validates its
 answer without executing it; the config is written only once it parses back exactly.
-Read `runs/intake/<name>/brief.md` before the go for `propose`, and the proposed inputs
-before the go for `check`: whether they span the regimes a patch can trade between is a
-judgment no command makes.
+Whether the proposed inputs span the regimes a patch can trade between is a judgment no
+command makes; on the step by step path, read `runs/intake/<name>/brief.md` and the
+proposed inputs before the go for `check`.
 
 `check` surveys the base tree, prints every rule's verdict and refuses the target if one
 fails. `profile` and `calibrate` write `docs` and each input's `noise_floor` back into
 the config, and write nothing if the file changed while their box ran. `run` refuses a
 config with any input that has no floor.
+
+`scribe` filters a finished run's attempts in code, shortlists at most twelve, and has
+one model conversation pick the one a maintainer would merge and write its pull request
+in the style of the repository's last merged ones. The model can read the target's
+source at the base commit, and is asked to teach the maintainer something about their
+code that the diff does not show. The explanation comes first, then one sentence and
+one table of measurements. A description stating a number with a unit that the
+measurements do not contain, or with a hyphen or dash anywhere in its prose, is sent
+back.

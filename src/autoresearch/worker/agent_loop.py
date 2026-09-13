@@ -8,7 +8,13 @@ box is terminated on every exit path. The patch is ``git diff`` of the repo,
 never model text.
 
 Caps and kill rules, each recorded as the stop reason:
-- max_turns, max_seconds, max_input_tokens from the config
+- max_turns and max_seconds from the config. The worker is never told either.
+  When the next turn is the last one the cap allows, the loop says so in a user
+  message and offers only the submit tool; a submit then is recorded as
+  last_turn, and anything else ends the attempt with the cap as the reason and
+  the diff as it stands. The time cap is announced with a margin of a few
+  median turns, since the next turn's length is unknown.
+- max_input_tokens from the config, a hard stop
 - repeated_tool_call: the same tool with the same arguments three times running
 - no_progress: two consecutive turns with no tool call, after one nudge
 - model_error and box_error: the platform failed after the client's retry
@@ -39,6 +45,7 @@ SETUP_TIMEOUT = 600
 REPEAT_LIMIT = 3
 NO_PROGRESS_LIMIT = 2
 TRANSCRIPT_CLIP = 4000
+TIME_MARGIN_TURNS = 2.0  # median turns kept in hand before the time cap
 
 
 @dataclass
@@ -78,6 +85,20 @@ def _release(box: Box) -> None:
 
 def _call_signature(call: ToolCall) -> str:
     return call.name + ":" + json.dumps(call.arguments, sort_keys=True)
+
+
+def _time_margin(turn_walls: list[float], factor: float = TIME_MARGIN_TURNS) -> float:
+    """Seconds to keep in hand so the last turn can be announced before the cap.
+
+    The loop cannot know how long the next turn takes, so it keeps a multiple of
+    the median turn so far: width 64 turns ran about four times slower than
+    width 16 on the same model. With no turn behind it there is nothing to
+    reserve, and a run whose cap is already spent gets its last turn at once.
+    """
+    if not turn_walls:
+        return 0.0
+    ordered = sorted(turn_walls)
+    return factor * ordered[len(ordered) // 2]
 
 
 class AgentLoopWorker:
@@ -149,9 +170,11 @@ class AgentLoopWorker:
                     a.measurement.to_dict(), indent=1
                 ).encode()
             if a.rationale.strip() or a.prediction is not None:
+                # The worker's own words first, so the file's first line is the
+                # mechanism sentence the index shows; the prediction follows.
                 predicted = "unknown" if a.prediction is None else f"{a.prediction.speedup:.2f}x"
                 files[f"{d}/rationale.md"] = (
-                    f"Predicted speedup: {predicted}\n\n{a.rationale.strip()}\n"
+                    f"{a.rationale.strip()}\n\nPredicted speedup: {predicted}\n"
                 ).encode()
         return files
 
@@ -232,7 +255,7 @@ class AgentLoopWorker:
 
         ctx = tools.ToolContext(box=box, target=inp.target)
         messages: list[Message] = [
-            {"role": "system", "content": prompt.system_prompt(python)},
+            {"role": "system", "content": prompt.system_prompt(inp.prompt, python)},
             {
                 "role": "user",
                 "content": prompt.initial_user_message(
@@ -247,19 +270,32 @@ class AgentLoopWorker:
         ]
         recent: list[str] = []
         idle_turns = 0
+        turn_walls: list[float] = []
+        # Set when the turn about to run has been announced as the last one. The
+        # worker is never told its budget; it is told when the budget is spent.
+        last_turn: StopReason | None = None
 
         try:
             while True:
-                if turns >= cfg.max_turns:
-                    return finish(StopReason.MAX_TURNS, patch=self._collect_patch(box))
-                if time.perf_counter() - t0 > cfg.max_seconds:
-                    return finish(StopReason.MAX_SECONDS, patch=self._collect_patch(box))
                 if usage.prompt_tokens > cfg.max_input_tokens:
                     return finish(StopReason.MAX_INPUT_TOKENS, patch=self._collect_patch(box))
+                if last_turn is not None:
+                    # The announced last turn came back without a submit.
+                    return finish(last_turn, patch=self._collect_patch(box))
+                remaining_s = cfg.max_seconds - (time.perf_counter() - t0)
+                if turns + 1 >= cfg.max_turns:
+                    last_turn = StopReason.MAX_TURNS
+                elif remaining_s < _time_margin(turn_walls):
+                    last_turn = StopReason.MAX_SECONDS
+                if last_turn is not None:
+                    messages.append({"role": "user", "content": prompt.LAST_TURN})
+                    transcript.add(kind="last_turn", turn=turns + 1, cap=str(last_turn))
+                specs = tools.TOOL_SPECS if last_turn is None else tools.SUBMIT_ONLY_SPECS
 
                 turns += 1
+                turn_t0 = time.perf_counter()
                 try:
-                    resp = self._model.complete(messages, tools.TOOL_SPECS, cache_key=inp.cache_key)
+                    resp = self._model.complete(messages, specs, cache_key=inp.cache_key)
                 except ModelError as e:
                     return finish(
                         StopReason.MODEL_ERROR, patch=self._collect_patch(box), error=str(e)
@@ -279,15 +315,31 @@ class AgentLoopWorker:
                     tool_calls=[{"name": c.name, "args": c.arguments} for c in resp.tool_calls],
                 )
 
-                if not resp.tool_calls:
+                if last_turn is not None:
+                    # Only a submit is honoured. Anything else is noted and not run;
+                    # the top of the loop then ends the attempt with the cap.
+                    calls = tuple(c for c in resp.tool_calls if c.name == "submit")[:1]
+                    for other in resp.tool_calls:
+                        if other not in calls:
+                            transcript.add(
+                                kind="tool",
+                                turn=turns,
+                                name=other.name,
+                                result="not run: last turn",
+                            )
+                    if not calls:
+                        continue
+                elif not resp.tool_calls:
                     idle_turns += 1
                     if idle_turns >= NO_PROGRESS_LIMIT:
                         return finish(StopReason.NO_PROGRESS, patch=self._collect_patch(box))
                     messages.append({"role": "user", "content": prompt.NUDGE})
                     continue
+                else:
+                    calls = resp.tool_calls
                 idle_turns = 0
 
-                for call in resp.tool_calls:
+                for call in calls:
                     recent.append(_call_signature(call))
                     recent = recent[-REPEAT_LIMIT:]
                     if len(recent) == REPEAT_LIMIT and len(set(recent)) == 1:
@@ -306,11 +358,12 @@ class AgentLoopWorker:
                             None if result.prediction is None else Prediction(result.prediction)
                         )
                         return finish(
-                            StopReason.SUBMITTED,
+                            StopReason.SUBMITTED if last_turn is None else StopReason.LAST_TURN,
                             patch=patch,
                             prediction=prediction,
                             rationale=result.rationale,
                         )
+                turn_walls.append(time.perf_counter() - turn_t0)
         except BoxError as e:
             return finish(StopReason.BOX_ERROR, error=str(e))
         finally:

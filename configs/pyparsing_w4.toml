@@ -1,0 +1,207 @@
+# pyparsing: written by autoresearch intake propose at 2026-09-13 10:54:47.
+# Run `autoresearch next configs/pyparsing_w4.toml` for the step it is at.
+#
+# input axis: grammar shape / core parse path
+# why it matters: Every timed call goes through ParserElement.parse_string in
+#                 pyparsing/core.py, but the dominant core code path changes with the
+#                 shape of the grammar. Flat CSV-like input spends its time in
+#                 _MultipleMatch and Word; the wide-alternative inputs spend time in
+#                 MatchFirst.parseImpl or Or.parseImpl; infix_notation spends time in
+#                 Forward/FollowedBy/Group recursion with packrat caching; and the left-
+#                 recursive grammar spends time in left-recursion memoization. A patch
+#                 that, for example, pre-indexes alternatives can make the wide
+#                 MatchFirst/Or inputs much faster while adding setup or dispatch
+#                 overhead that hurts the small MatchFirst expressions inside the flat
+#                 grammar. A patch that changes recursive caching may help one recursive
+#                 path and leave or hurt the other. Distinct code paths are therefore
+#                 represented separately rather than relying on one size axis.
+
+[run]
+run_id = "pyparsing_w4"
+width = 4
+rounds = 2
+
+[target]
+name = "pyparsing"
+repo = "https://github.com/pyparsing/pyparsing"
+sha = "efd56db4e59f36b1673ce0eb0823e3afaa9d1201"
+package = "pyparsing"
+alias = "pp"
+package_root = "."
+hot_file = "pyparsing/core.py"
+call = "parser.parse_string(text, parse_all=True)"
+pip = ["railroad-diagrams", "jinja2", "matplotlib"]
+allow = ["pyparsing/**"]
+deny = ["tests/**", "docs/**", "examples/**"]
+fingerprint = "result.as_list()"
+docs = ["configs/docs/pyparsing_w4/profile_inputs.txt", "configs/docs/pyparsing_w4/profile_flat_csv_words_flat.txt", "configs/docs/pyparsing_w4/profile_flat_csv_words_callers.txt"]
+
+[target.tests]
+module = "tests/test_unit.py"
+full = "tests"
+
+# regime: flat repetition through Word, DelimitedList and OneOrMore
+# why: Exercises the many-token repetition loop in _MultipleMatch.parseImpl and
+#      Word.parseImpl, with a small MatchFirst used only inside each delimited field.
+[[target.inputs]]
+name = "flat_csv_words"
+noise_floor = 1.0347   # calibrated 20260913-105650, 42 null pairs
+setup = '''
+import random
+pp.ParserElement.disable_memoization()
+rnd = random.Random(101)
+rows = 3500
+cols = 8
+lines = []
+for _ in range(rows):
+    lines.append(",".join(f"v{rnd.randint(0, 10_000)}" for _ in range(cols)))
+text = "\n".join(lines)
+field = pp.Word(pp.alphanums)
+row = pp.DelimitedList(field)
+parser = pp.OneOrMore(row)
+'''
+
+# regime: wide MatchFirst dispatch over 1000 literal alternatives
+# why: Each of 500 space-separated tokens is parsed by MatchFirst.parseImpl, which scans
+#      alternatives from the first until it hits the matching literal; this is the
+#      sequential-dispatch path and is sensitive to ordering or indexing optimizations.
+[[target.inputs]]
+name = "matchfirst_many_alts"
+noise_floor = 1.0164   # calibrated 20260913-105650, 42 null pairs
+setup = '''
+import random
+pp.ParserElement.disable_memoization()
+rnd = random.Random(202)
+n_alts = 1000
+n_tokens = 500
+alts = [pp.Literal(f"KW{i:05d}") for i in range(n_alts)]
+rnd.shuffle(alts)
+text = " ".join(a.match for a in alts[:n_tokens])
+parser = pp.OneOrMore(pp.MatchFirst(alts))
+'''
+
+# regime: wide Or longest-match dispatch over 1000 literal alternatives
+# why: Or.parseImpl evaluates every alternative for each of 500 tokens, collects
+#      matching alternatives, sorts them, and reparses the best one; this stresses the
+#      all-alternatives path and can gain from early filtering but may lose if
+#      alternatives must be replayed.
+[[target.inputs]]
+name = "or_many_alts"
+noise_floor = 1.0149   # calibrated 20260913-105650, 42 null pairs
+setup = '''
+import random
+pp.ParserElement.disable_memoization()
+rnd = random.Random(303)
+n_alts = 1000
+n_tokens = 500
+alts = [pp.Literal(f"KW{i:05d}") for i in range(n_alts)]
+rnd.shuffle(alts)
+text = " ".join(a.match for a in alts[:n_tokens])
+parser = pp.OneOrMore(pp.Or(alts))
+'''
+
+# regime: precedence recursion with Forward, FollowedBy and Group under packrat
+# why: Exercises the recursive Forward/Group/lookahead parse path built by
+#      infix_notation, with ParserElement._parseCache and packrat cache updates as the
+#      grammar backtracks over a 250-term expression.
+[[target.inputs]]
+name = "infix_recursive"
+noise_floor = 1.0200   # calibrated 20260913-105650, 42 null pairs
+setup = '''
+import random
+pp.ParserElement.disable_memoization()
+pp.ParserElement.enable_packrat(force=True)
+rnd = random.Random(404)
+ops = ["+", "-", "*", "/", "%"]
+n_terms = 250
+terms = []
+for _ in range(n_terms):
+    t = str(rnd.randint(0, 10_000))
+    if rnd.random() < 0.15:
+        t = f"({t})"
+    terms.append(t)
+text = terms[0]
+for i in range(1, n_terms):
+    text += f" {rnd.choice(ops)} {terms[i]}"
+integer = pp.Word(pp.nums)
+unary_addsub = pp.one_of("+ -", use_regex=False)
+fact = pp.one_of("!", use_regex=False)
+pow_op = pp.one_of("^", use_regex=False)
+muldiv = pp.one_of("* / %", use_regex=False)
+binary_addsub = pp.one_of("+ -", use_regex=False)
+parser = pp.infix_notation(
+    integer,
+    [
+        (unary_addsub, 1, pp.OpAssoc.RIGHT),
+        (fact, 1, pp.OpAssoc.LEFT),
+        (pow_op, 2, pp.OpAssoc.LEFT),
+        (muldiv, 2, pp.OpAssoc.LEFT),
+        (binary_addsub, 2, pp.OpAssoc.LEFT),
+    ],
+)
+'''
+
+# regime: bounded left-recursion through Forward with left-recursion memoization
+# why: Exercises the special Forward left-recursion path enabled by
+#      ParserElement.enable_left_recursion, where recursive matches are iterated and
+#      memoized; ordinary parse-path changes do not accelerate this mode and may not
+#      apply at all.
+[[target.inputs]]
+name = "left_recursive"
+noise_floor = 1.0338   # calibrated 20260913-105650, 42 null pairs
+setup = '''
+import random
+pp.ParserElement.disable_memoization()
+pp.ParserElement.enable_left_recursion(force=True)
+rnd = random.Random(505)
+ops = ["+", "-", "*", "/", "%"]
+n_terms = 250
+terms = []
+for _ in range(n_terms):
+    t = str(rnd.randint(0, 10_000))
+    if rnd.random() < 0.15:
+        t = f"({t})"
+    terms.append(t)
+text = terms[0]
+for i in range(1, n_terms):
+    text += f" {rnd.choice(ops)} {terms[i]}"
+integer = pp.Word(pp.nums)
+muldiv = pp.one_of("* / %", use_regex=False)
+addsub = pp.one_of("+ -", use_regex=False)
+lpar, rpar = map(pp.Suppress, "()")
+E = pp.Forward("E")
+T = pp.Forward("T")
+F = integer | lpar + E + rpar
+T <<= T + muldiv + F | F
+E <<= E + addsub + T | T
+parser = E
+'''
+
+[worker]
+model = "deepseek/deepseek-v4-pro-0813"
+reasoning_effort = "high"
+completion_window = "asap"
+max_turns = 80
+max_seconds = 3600
+max_input_tokens = 8000000
+turn_timeout = 600
+
+[referee]
+pairs = 6
+repeats_per_launch = 7
+min_clean_pairs = 4
+hash_seeds = [0, 1, 2, 3, 4]
+
+[boxes]
+worker_size = "m"
+referee_size = "m"
+control_size = "s"
+disk_gib = 32
+
+[storage]
+volume = "autoresearch"
+mount = "/mnt/autoresearch"
+
+[observe]
+enabled = true
+session_prefix = ""

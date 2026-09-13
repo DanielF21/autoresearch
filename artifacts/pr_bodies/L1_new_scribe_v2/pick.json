@@ -1,0 +1,4 @@
+{
+  "attempt": 2,
+  "reasons": "Attempt 2 is the most mergeable. It stays inside the existing set-based algorithm, only changes the `nodes is None` path, keeps the explicit-nodes fallback untouched, and introduces no node-label restrictions, size thresholds, new imports, or new dependencies. The win comes from eliminating the repeated `set(G._pred[j])`/`set(G._succ[j])` construction per neighbor and the Python `sum(1 for k in chain(...))` overlap count, replacing them with per-node cached pred/succ sets and `len` set intersections. The bitset candidates are faster, but they make maintainers read 60-170 lines of specialized integer/bitset code with magic cutoffs such as 4096/8192 or density-dependent branches; attempts 1 and 8 also have no size gating and can blow up mask memory on large contiguous graphs. Attempt 2 is the change I would write a pull request for."
+}

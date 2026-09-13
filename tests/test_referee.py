@@ -13,6 +13,7 @@ from autoresearch.boxes.fake_box import FakeBox, ok
 from autoresearch.boxes.protocol import BoxError
 from autoresearch.config import RunConfig, SuitePaths, load_config
 from autoresearch.referee.referee import BASE_TREE, PATCHED_TREE, Referee, guest_command
+from autoresearch.types import Attempt, AttemptRef, StopReason, Usage
 from tests.helpers import BASE_SHA
 from tests.helpers import referee_box as make_box
 
@@ -145,18 +146,63 @@ def test_patched_tree_that_cannot_run_skips_timing(config: RunConfig) -> None:
     assert not any("--repeats" in c for c in box.commands)
 
 
-def test_contaminated_pairs_retry_once_then_record_an_error(config: RunConfig) -> None:
+def test_contaminated_pairs_retry_then_leave_the_input_untimed(config: RunConfig) -> None:
     box = make_box(contaminate_pairs=True)
     m = _referee(box, config).measure(PRECOMPUTE)
     n = _n_inputs(config)
+    retries = config.referee.timing_retries
+    assert retries == 2  # the default; the frozen config does not set it
     assert m.speedup is None
-    assert all(i.retried for i in m.inputs), "every input should have retried once"
-    assert all(any("clean pairs" in e for e in i.errors) for i in m.inputs)
+    assert all(i.retried and i.retries == retries for i in m.inputs)
+    assert all(any("untimed" in e for e in i.errors) for i in m.inputs)
+    assert m.untimed == tuple(i.name for i in config.target.inputs)
+    assert not m.clears_noise
     launches = [c for c in box.commands if "time_target.py" in c and "--repeats" in c]
-    # Two passes of six pairs, two launches each, for every input.
-    assert len(launches) == n * 2 * 6 * 2
+    # One pass plus every retry, six pairs of two launches each, for every input.
+    assert len(launches) == n * (1 + retries) * 6 * 2
     assert all(p.contaminated for p in _first(m).pairs)
     assert _first(m).pairs[0].reasons == ("steal",)
+
+
+def test_a_retry_that_comes_back_clean_times_the_input(config: RunConfig) -> None:
+    # The first pass of every input is tainted, twelve launches; the retry is clean.
+    box = make_box(speedup=1.5, contaminate_pairs=12)
+    m = _referee(box, config).measure(PRECOMPUTE)
+    assert all(i.retried and i.retries == 1 and i.errors == () for i in m.inputs)
+    assert all(i.speedup == pytest.approx(1.5) for i in m.inputs)
+    assert m.untimed == () and m.clears_noise
+
+
+def test_an_attempt_with_an_untimed_input_is_named_and_never_a_real_speedup(
+    config: RunConfig,
+) -> None:
+    """The mean over the inputs that were timed is kept, but it cannot be a record.
+
+    The width experiment's two largest recorded speedups were attempts whose
+    cheap sparse inputs never timed; the mean over the rest was 34x and 32x
+    against 23x and 27x with all five.
+    """
+    from autoresearch.worker.prompt import outcome
+
+    first = config.target.inputs[0].name
+    box = make_box(speedup=1.5)
+    m = _referee(box, config).measure(PRECOMPUTE)
+    inputs = tuple(replace(i, speedup=None, pairs=()) if i.name == first else i for i in m.inputs)
+    partial = replace(m, inputs=inputs)
+    assert partial.speedup == pytest.approx(1.5) and partial.result_matches is True
+    assert partial.untimed == (first,) and not partial.clears_noise
+    attempt = Attempt(
+        ref=AttemptRef(1, 1, 0),
+        base_sha=config.target.sha,
+        patch=PRECOMPUTE,
+        prediction=None,
+        rationale="",
+        stop_reason=StopReason.SUBMITTED,
+        usage=Usage(),
+        wall_s=1.0,
+        measurement=partial,
+    )
+    assert outcome(attempt) == f"timing failed on {first}"
 
 
 def test_timing_launches_are_pinned_seeded_and_alternate(config: RunConfig) -> None:
