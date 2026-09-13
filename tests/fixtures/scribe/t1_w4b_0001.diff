@@ -1,0 +1,74 @@
+diff --git a/networkx/algorithms/cluster.py b/networkx/algorithms/cluster.py
+index e74e10aad..3c4951500 100644
+--- a/networkx/algorithms/cluster.py
++++ b/networkx/algorithms/cluster.py
+@@ -167,6 +167,69 @@ def _directed_triangles_and_degree_iter(G, nodes=None):
+     directed triangles so does not count triangles twice.
+ 
+     """
++    if nodes is None and G.number_of_nodes() <= 8192:
++        # For small and medium directed graphs, encode each node's in- and
++        # out-neighbourhoods as bitsets.  The directed triangle count for a
++        # node is a sum over its in- and out-neighbours of four set
++        # intersections; bitsets make those intersections and their
++        # cardinalities cheap C-level integer operations.
++        node_to_id = {n: i for i, n in enumerate(G)}
++        n_nodes = G.number_of_nodes()
++        pred_masks = [0] * n_nodes
++        succ_masks = [0] * n_nodes
++
++        for i, n in enumerate(G):
++            pmask = 0
++            for u in G._pred[n]:
++                if u != n:
++                    pmask |= 1 << node_to_id[u]
++            pred_masks[i] = pmask
++
++            smask = 0
++            for u in G._succ[n]:
++                if u != n:
++                    smask |= 1 << node_to_id[u]
++            succ_masks[i] = smask
++
++        bit_count = int.bit_count
++        for i, n in enumerate(G):
++            ipreds = pred_masks[i]
++            isuccs = succ_masks[i]
++
++            directed_triangles = 0
++            neighbors = ipreds
++            while neighbors:
++                lsb = neighbors & -neighbors
++                j = lsb.bit_length() - 1
++                jpreds = pred_masks[j]
++                jsuccs = succ_masks[j]
++                directed_triangles += (
++                    bit_count(ipreds & jpreds)
++                    + bit_count(ipreds & jsuccs)
++                    + bit_count(isuccs & jpreds)
++                    + bit_count(isuccs & jsuccs)
++                )
++                neighbors ^= lsb
++
++            neighbors = isuccs
++            while neighbors:
++                lsb = neighbors & -neighbors
++                j = lsb.bit_length() - 1
++                jpreds = pred_masks[j]
++                jsuccs = succ_masks[j]
++                directed_triangles += (
++                    bit_count(ipreds & jpreds)
++                    + bit_count(ipreds & jsuccs)
++                    + bit_count(isuccs & jpreds)
++                    + bit_count(isuccs & jsuccs)
++                )
++                neighbors ^= lsb
++
++            dtotal = ipreds.bit_count() + isuccs.bit_count()
++            dbidirectional = (ipreds & isuccs).bit_count()
++            yield (n, dtotal, dbidirectional, directed_triangles)
++        return
++
+     nodes_nbrs = ((n, G._pred[n], G._succ[n]) for n in G.nbunch_iter(nodes))
+ 
+     for i, preds, succs in nodes_nbrs:

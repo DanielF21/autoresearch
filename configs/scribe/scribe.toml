@@ -1,0 +1,55 @@
+# The Scribe's config. Separate from every run config, which is frozen per run.
+#
+# Every number here is an untuned knob, chosen so a first real step is small, not
+# measured. Replace a value with a measured one only when a dev run or a
+# calibration has produced it, and cite the record next to it.
+
+[scribe]
+output_root = "runs/scribe"               # runs/ is gitignored; never inside a run directory
+cache_root = "~/.cache/autoresearch/scribe"  # target clones and worktrees
+method = "src/autoresearch/scribe/methods/v1"
+
+[corpus]
+n = 20                  # the user's range is 10 to 20 merged PRs by people
+pool = 60               # gh orders by creation, so fetch more and sort by merge time
+exclude_authors = []    # bots are dropped by is_bot, [bot] and app/ already
+holdout_n = 8           # judge decoys and blind rank fillers; never shown to the writer
+seed = 7
+template_path = ".github/PULL_REQUEST_TEMPLATE.md"
+
+[filters]
+min_inputs = 2          # a single input record cannot show behaviour across input shapes
+
+# One model per role. Whether a judge from another model family reduces self
+# preference is unmeasured; change it only after calibration.
+[models.reviewer]
+model = "deepseek/deepseek-v4-pro-0813"
+reasoning_effort = "high"
+completion_window = "asap"
+turn_timeout = 600
+max_turns = 30
+max_seconds = 1800
+max_input_tokens = 2000000
+
+[models.writer]
+model = "deepseek/deepseek-v4-pro-0813"
+reasoning_effort = "high"
+completion_window = "asap"
+turn_timeout = 600
+max_turns = 20
+max_seconds = 1200
+max_input_tokens = 1500000
+
+[models.judge]
+model = "deepseek/deepseek-v4-pro-0813"
+reasoning_effort = "high"
+completion_window = "asap"
+turn_timeout = 600
+max_turns = 3
+max_seconds = 600
+max_input_tokens = 200000
+
+[dev]
+review_repeats = 3
+calibration_trials = 6
+blind_real_count = 6

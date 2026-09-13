@@ -1,0 +1,51 @@
+# Labelled patches for checking the mergeability reviewer. Every label is the
+# measurement in artifacts/generality.md section 1: each patch timed at five
+# densities at n=1000 against stock. "regresses" is a worst ratio below 1.
+#
+# Confound, stated so nobody scores it by accident: every regressor adds a numpy
+# import and no safe patch does. review_check only counts a regressor as caught
+# when the reviewer's reasons name the inputs at risk.
+
+risk_keywords = ["sparse", "low degree", "average degree", "few edges", "density", "number of nodes", "node count", "n^3", "n**3", "n³", "dense matrix"]
+
+[[items]]
+run = "runs/t1_w4b"
+attempt = 1
+label = "safe"
+source = "generality.md section 1: worst 1.87x at d=0.5"
+
+[[items]]
+run = "runs/t1_w4"
+attempt = 2
+label = "safe"
+source = "generality.md section 1: worst 1.81x at d=0.5"
+
+[[items]]
+run = "runs/t1_w4b"
+attempt = 4
+label = "safe"
+source = "generality.md section 1: worst 1.46x at d=0.5"
+
+[[items]]
+run = "runs/t1_w4b"
+attempt = 8
+label = "regresses"
+source = "generality.md section 1: 0.30x at d=0.5"
+
+[[items]]
+run = "runs/t1_w4"
+attempt = 7
+label = "regresses"
+source = "generality.md section 1: 0.35x at d=0.5"
+
+[[items]]
+run = "runs/t1_w4b"
+attempt = 10
+label = "regresses"
+source = "generality.md section 1: 0.22x at d=0.5"
+
+[[items]]
+run = "runs/t1_w4"
+attempt = 12
+label = "regresses"
+source = "generality.md section 1: 0.25x at d=0.5"
