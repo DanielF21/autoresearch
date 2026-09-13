@@ -102,7 +102,7 @@ hash_seeds = [0, 1, 2, 3, 4]
 [boxes]
 worker_size = "m"
 referee_size = "m"
-control_size = "s"
+control_size = "m"           # four orchestrators share it; size s is 1 cpu and 1 GB
 disk_gib = 32
 
 [storage]
