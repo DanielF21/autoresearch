@@ -152,8 +152,8 @@ def test_an_input_needs_a_setup() -> None:
 
 
 def test_an_input_without_a_floor_is_uncalibrated_not_invalid() -> None:
-    """A new target has no floors until calibrate.py has run. The config must
-    load so calibrate.py can read it; a run is what refuses it, by name."""
+    """A new target has no floors until autoresearch calibrate has run. The config must
+    load so calibrate can read it; a run is what refuses it, by name."""
     floored = '[[target.inputs]]\nname = "a"\nsetup = "G = nx.g()"\nnoise_floor = 1.02\n'
     bare = '[[target.inputs]]\nname = "b"\nsetup = "G = nx.h()"\n'
     cfg = parse_config(_target_block(floored, bare))

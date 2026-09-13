@@ -107,6 +107,22 @@ def referee_box(
     def time_target(cmd: str) -> CommandResult:
         root = arg(cmd, "--root")
         patched = root == PATCHED_TREE
+        if "--profile" in cmd:
+            return ok(
+                json.dumps(
+                    {
+                        "kind": "profile",
+                        "call_s": 0.25,
+                        "hot_executed": True,
+                        "hot_s": 0.2,
+                        "total_s": 0.25,
+                        "hot_tottime_share": 0.8,
+                        "flat": f"flat view of {arg(cmd, '--setup')}\n",
+                        "callers": "callers view\n",
+                        "result_fp": "fp_same",
+                    }
+                )
+            )
         if "--verify" in cmd:
             # A verify launch carries no label, so an input is identified here
             # by its setup statements, which are the only thing that names it.

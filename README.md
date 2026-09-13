@@ -40,7 +40,7 @@ however it exits:
   exception, Ctrl+C, SIGTERM or SIGHUP. A resumed run builds new ones, and first
   terminates any a killed run left named in `boxes.json`.
 - A worker terminates its own box at the end of every attempt.
-- `check`, `measure` and `calibrate.py` terminate their box unless `--keep`.
+- `check`, `profile`, `calibrate` and `measure` terminate their box unless `--keep`.
 - A launched run is followed by `release-control`, which terminates the control
   box once no run is going on it, unless launched with `--keep-control`. `fetch`
   brings up a temporary box on the volume when the control box is gone.
@@ -79,7 +79,7 @@ full = "tests"                 # the whole suite; the referee runs it on every s
 [[target.inputs]]
 name = "small"
 setup = "x = p.make(100)"      # statements run once per launch, with the alias and ROOT bound
-                               # noise_floor is absent until calibrate.py has measured it
+                               # noise_floor is absent until autoresearch calibrate has measured it
 ```
 
 `setup` runs in a namespace holding the package under `alias` and `ROOT`, a `pathlib.Path`
@@ -106,14 +106,28 @@ any target:
    seconds with four xdist workers for the full suite.
 7. **Dependencies installable by pip or apt on Debian.**
 
-The order for a new target, each step on its own box or none:
+The order for a new target. Each step is its own command, so each cost is its own
+decision, and nothing runs the next step for you:
 
 ```
-uv run autoresearch check configs/<target>.toml       # one referee box, no model: judges the rules above
-uv run profile_target.py configs/<target>.toml --repo <local checkout> --out configs/docs
-uv run calibrate.py configs/<target>.toml --rounds 7   # one referee box, no model: the noise floors
-uv run autoresearch run configs/<target>.toml --until N
+uv run autoresearch intake <github url>                  # free: clone, judge scope, draft metadata and a brief
+uv run autoresearch intake propose runs/intake/<name>    # one model conversation: call, inputs, config
+uv run autoresearch check configs/<run_id>.toml          # one referee box, no model: judges the rules above
+uv run autoresearch profile configs/<run_id>.toml        # one referee box, no model: the worker's documents
+uv run autoresearch calibrate configs/<run_id>.toml      # one referee box, no model: the noise floors
+uv run autoresearch run configs/<run_id>.toml --until 1
+uv run autoresearch next configs/<run_id>.toml           # free: which step a config is at, what the next creates
 ```
+
+`intake` never runs the repository's code: it reads files, and refuses a repository that
+is not a Python project, has a compiled build, has no package at `.` or `src/`, or has no
+tests. `intake propose` gives the model read only tools over the clone and validates its
+answer without executing it; the config is written only once it parses back exactly.
+Read `runs/intake/<name>/brief.md` before the go for `propose`, and the proposed inputs
+before the go for `check`: whether they span the regimes a patch can trade between is a
+judgment no command makes.
 
 `check` surveys the base tree, prints every rule's verdict and refuses the target if one
-fails. `run` refuses a config with any input that has no floor.
+fails. `profile` and `calibrate` write `docs` and each input's `noise_floor` back into
+the config, and write nothing if the file changed while their box ran. `run` refuses a
+config with any input that has no floor.

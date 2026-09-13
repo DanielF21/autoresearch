@@ -115,6 +115,19 @@ class Survey:
 
 
 @dataclass(frozen=True)
+class InputProfile:
+    """One input on the base tree: plain call time, and where cProfile saw it go."""
+
+    name: str
+    setup: str
+    call_s: float
+    hot_s: float
+    share: float
+    flat: str
+    callers: str
+
+
+@dataclass(frozen=True)
 class GuestRecord:
     data: dict[str, Any]
     raw: CommandResult
@@ -382,6 +395,42 @@ class Referee:
         finally:
             self._cleanup()
         return Survey(inputs=tuple(inputs), tests=tuple(suites), errors=tuple(errors))
+
+    def profile(self) -> tuple[InputProfile, ...]:
+        """Every input profiled on the base tree, in config order. No patch, no floor.
+
+        What the profile documents are made from, so a worker reads times taken on
+        a referee box rather than on whatever machine wrote the config. An input
+        that cannot run raises GuestError: documents missing an input would tell
+        the worker the set is smaller than the one it is graded on.
+        """
+        target = self._config.target
+        out: list[InputProfile] = []
+        try:
+            self._worktree(BASE_TREE, target.sha, patch_file=None)
+            for spec in target.inputs:
+                rec = self._guest(
+                    "time_target.py",
+                    *self._target_args(BASE_TREE, spec),
+                    "--profile",
+                    timeout=LAUNCH_TIMEOUT,
+                )
+                if rec.get("error"):
+                    raise GuestError(f"profile failed for {spec.name}: {rec.get('error')}")
+                out.append(
+                    InputProfile(
+                        name=spec.name,
+                        setup=spec.setup,
+                        call_s=float(rec.get("call_s", 0.0)),
+                        hot_s=float(rec.get("hot_s", 0.0)),
+                        share=float(rec.get("hot_tottime_share", 0.0)),
+                        flat=str(rec.get("flat", "")),
+                        callers=str(rec.get("callers", "")),
+                    )
+                )
+        finally:
+            self._cleanup()
+        return tuple(out)
 
     def _survey_input(self, spec: BenchmarkInput) -> InputSurvey:
         try:

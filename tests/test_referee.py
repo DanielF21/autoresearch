@@ -239,7 +239,7 @@ def test_the_full_suite_is_the_configured_path_not_derived_from_the_hot_file(
 
 
 def test_measure_refuses_an_uncalibrated_input_by_name(config: RunConfig) -> None:
-    """calibrate.py and check accept a floorless input; a measurement cannot."""
+    """calibrate and check accept a floorless input; a measurement cannot."""
     first, *rest = config.target.inputs
     bare = replace(
         config, target=replace(config.target, inputs=(replace(first, noise_floor=None), *rest))

@@ -60,7 +60,7 @@ def test_run_and_measure_refuse_an_uncalibrated_config_by_name(
     cfg.write_text(text)
     assert main(["run", str(cfg)]) == 2
     err = capsys.readouterr().err
-    assert "cannot run" in err and "gn800" in err and "calibrate.py" in err
+    assert "cannot run" in err and "gn800" in err and "autoresearch calibrate" in err
     assert main(["measure", str(cfg), "x.diff"]) == 2
     assert "cannot measure" in capsys.readouterr().err
 

@@ -98,6 +98,21 @@ def test_time_target_verify_mode_sees_the_hot_file(fake_tree: Path) -> None:
     assert float(str(out["call_s"])) > 0
 
 
+def test_time_target_profile_mode_times_plainly_then_profiles(fake_tree: Path) -> None:
+    out = _run("time_target.py", *_target(fake_tree), "--profile", "--flat-rows", "5")
+    assert out["_rc"] == 0, out
+    assert out["kind"] == "profile"
+    assert out["hot_executed"] is True
+    assert float(str(out["call_s"])) > 0
+    assert 0 < float(str(out["hot_s"])) <= float(str(out["total_s"]))
+    assert 0.0 < float(str(out["hot_tottime_share"])) <= 1.0
+    flat, callers = str(out["flat"]), str(out["callers"])
+    # The tree's own path is stripped, so the documents read the same from any box.
+    assert "fakepkg/hot.py" in flat and str(fake_tree) not in flat
+    assert "tottime" in flat and "was called by" in callers
+    assert len(str(out["result_fp"])) == 10
+
+
 def test_time_target_imports_from_a_src_layout(src_tree: Path) -> None:
     out = _run("time_target.py", *_target(src_tree, "src"), "--repeats", "1", "--no-counters")
     assert out["_rc"] == 0, out

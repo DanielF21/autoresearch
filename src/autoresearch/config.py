@@ -55,7 +55,7 @@ class BenchmarkInput:
     not of the patch. A one millisecond call's ratio scatters about twice as
     wide as a 1.4 second one, so a single floor is either too loose for the slow
     input or too tight for the fast one. See artifacts/generality.md section 8.
-    ``None`` means not yet calibrated: calibrate.py and the check command accept
+    ``None`` means not yet calibrated: the calibrate and check commands accept
     such an input, a run refuses it by name.
     """
 

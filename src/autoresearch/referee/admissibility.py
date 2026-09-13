@@ -26,6 +26,8 @@ stated in the README, and nothing in a survey can see it.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 
 from autoresearch.config import TargetSpec
@@ -46,6 +48,20 @@ class Verdict:
     @property
     def failed(self) -> bool:
         return self.level == "fail"
+
+
+def admission_hash(target: TargetSpec) -> str:
+    """What a check judged, without what later steps write back.
+
+    Floors and docs come after admission, so writing them must not make a
+    passing check look stale. Anything else changed, an input's setup most of
+    all, and the check no longer describes the config.
+    """
+    d = target.to_dict()
+    d.pop("docs")
+    for i in d["inputs"]:
+        i.pop("noise_floor")
+    return hashlib.sha256(json.dumps(d, sort_keys=True).encode()).hexdigest()[:12]
 
 
 def call_max_s(repeats_per_launch: int) -> float:
@@ -157,7 +173,7 @@ def judge(target: TargetSpec, survey: Survey, repeats_per_launch: int) -> tuple[
                 "note",
                 "uncalibrated: "
                 + ", ".join(target.uncalibrated)
-                + "; run calibrate.py before a run",
+                + "; run autoresearch calibrate before a run",
             )
         )
     return tuple(out)

@@ -25,6 +25,9 @@ Modes:
 - ``--verify``: profile one call and report whether the hot file executed and
   what share of self time it took. Also warms the ``.pyc`` so no later launch
   pays compilation.
+- ``--profile``: the plain minimum of three calls, then one call under cProfile,
+  with the hot file's self time and the flat and callers views as text. What
+  the profile documents a worker reads are made from.
 
 Both modes report ``fixed_s``, the age of this process when the first timed
 call began: interpreter start, the import and the setup. It is read from
@@ -50,6 +53,7 @@ HERE = pathlib.Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
 FLOAT_PLACES = 9
+PROFILE_PLAIN_RUNS = 3
 
 
 class UnfingerprintableError(ValueError):
@@ -117,6 +121,38 @@ def _pyc_fresh(hot: pathlib.Path) -> bool:
     return pyc.exists() and pyc.stat().st_mtime >= hot.stat().st_mtime
 
 
+def hot_self_time(stats: Any, hot: pathlib.Path) -> tuple[float, float, bool]:
+    """Self seconds inside ``hot``, the profile's total self seconds, and whether it ran."""
+    executed = False
+    hot_tt = 0.0
+    total = 0.0
+    for (fname, _line, _fn), (_cc, _nc, tt, _ct, _callers) in stats.stats.items():
+        total += tt
+        if fname and not fname.startswith(("<", "~")):
+            try:
+                rp = pathlib.Path(fname).resolve()
+            except OSError:
+                continue
+            if rp == hot:
+                executed = True
+                hot_tt += tt
+    return hot_tt, total, executed
+
+
+def render_stats(stats: Any, view: str, rows: int, root: pathlib.Path) -> str:
+    """The flat or callers view by self time, with the tree's path stripped."""
+    import io
+
+    out = io.StringIO()
+    stats.stream = out
+    stats.sort_stats("tottime")
+    if view == "flat":
+        stats.print_stats(rows)
+    else:
+        stats.print_callers(rows)
+    return out.getvalue().replace(str(root) + "/", "")
+
+
 def _fail(**record: Any) -> int:
     print(json.dumps(record))
     return 3
@@ -141,6 +177,9 @@ def main() -> int:
     ap.add_argument("--repeats", type=int, default=7)
     ap.add_argument("--label", default="")
     ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--profile", action="store_true")
+    ap.add_argument("--flat-rows", type=int, default=14)
+    ap.add_argument("--caller-rows", type=int, default=10)
     ap.add_argument("--no-counters", action="store_true")
     args = ap.parse_args()
 
@@ -198,28 +237,52 @@ def main() -> int:
         profiler.disable()
         call_s = time.perf_counter() - t0
         stats = pstats.Stats(profiler)
-        files: set[pathlib.Path] = set()
-        hot_tottime = 0.0
-        total_tt = 0.0
-        for (fname, _line, _fn), (_cc, _nc, tt, _ct, _callers) in stats.stats.items():  # type: ignore[attr-defined]
-            total_tt += tt
-            if fname and not fname.startswith(("<", "~")):
-                try:
-                    rp = pathlib.Path(fname).resolve()
-                except OSError:
-                    continue
-                files.add(rp)
-                if rp == hot:
-                    hot_tottime += tt
+        hot_tottime, total_tt, executed = hot_self_time(stats, hot)
         try:
             result_fp = fp_of(result)
         except UnfingerprintableError as e:
             return _fail(error=str(e), **base)
         base.update(
             kind="verify",
-            hot_executed=hot in files,
+            hot_executed=executed,
             hot_tottime_share=hot_tottime / total_tt if total_tt else 0.0,
             call_s=call_s,
+            result_fp=result_fp,
+        )
+        print(json.dumps(base))
+        return 0
+
+    if args.profile:
+        import cProfile
+        import pstats
+
+        base["fixed_s"] = process_age_s()
+        plain: list[float] = []
+        for _ in range(PROFILE_PLAIN_RUNS):
+            gc.collect()
+            t0 = time.perf_counter()
+            result = eval(args.call, scope)
+            plain.append(time.perf_counter() - t0)
+        gc.collect()
+        profiler = cProfile.Profile()
+        profiler.enable()
+        eval(args.call, scope)
+        profiler.disable()
+        stats = pstats.Stats(profiler)
+        hot_tottime, total_tt, executed = hot_self_time(stats, hot)
+        try:
+            result_fp = fp_of(result)
+        except UnfingerprintableError as e:
+            return _fail(error=str(e), **base)
+        base.update(
+            kind="profile",
+            call_s=min(plain),
+            hot_executed=executed,
+            hot_s=hot_tottime,
+            total_s=total_tt,
+            hot_tottime_share=hot_tottime / total_tt if total_tt else 0.0,
+            flat=render_stats(stats, "flat", args.flat_rows, root),
+            callers=render_stats(stats, "callers", args.caller_rows, root),
             result_fp=result_fp,
         )
         print(json.dumps(base))
