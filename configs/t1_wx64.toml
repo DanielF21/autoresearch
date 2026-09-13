@@ -1,7 +1,7 @@
 # Target 1, width 64: the width experiment, launched 2026-09-12 on the control box.
 #
 # Identical to t1_w4d.toml except run_id, width and rounds. Four of these run at
-# once, widths 1, 4, 16 and 64, 20 rounds each, so the only thing that differs
+# once, widths 1, 4, 16 and 64, 16 rounds each, so the only thing that differs
 # between them is how many workers see the same history each round.
 #
 # Every number is either a user decision or a measurement, noted inline.
@@ -9,7 +9,7 @@
 [run]
 run_id = "t1_wx64"
 width = 64
-rounds = 20
+rounds = 16
 
 [target]
 name = "networkx_clustering_er1000_005"
