@@ -12,8 +12,11 @@ find it. Nothing here needs the key except ``launch``.
 from __future__ import annotations
 
 import json
+import os
+import shlex
 from collections.abc import Mapping
 from dataclasses import dataclass
+from itertools import pairwise
 from pathlib import Path
 
 from autoresearch.boxes.protocol import Box, BoxError, BoxFactory
@@ -103,7 +106,9 @@ def deploy(
         )
         if not r.ok:
             raise BoxError(f"volume not mounted at {config.storage.mount}: {r.stderr[-300:]}")
-    except BoxError:
+    except BaseException:
+        # Any failure, not only a box one: a staging copy that raises would
+        # otherwise leave a control box nobody has a record of.
         box.terminate()
         raise
     return ControlInfo(
@@ -111,23 +116,69 @@ def deploy(
     )
 
 
-def launch_command(config: RunConfig, config_path: str, until: int | None = None) -> str:
-    """The detached command that runs one setting inside the control box."""
+def launch_command(
+    config: RunConfig,
+    config_path: str,
+    until: int | None = None,
+    *,
+    control_box_id: str = "",
+    keep_control: bool = False,
+) -> str:
+    """The detached command that runs one setting inside the control box.
+
+    Unless ``keep_control``, the run is followed by ``release-control``, which
+    terminates the control box once no other run is going on it. It follows the
+    run whether the run succeeded or not: a control box outliving its last run
+    is idle and never sleeps. The run directory is on the volume, so nothing is
+    lost, and ``fetch`` brings up a temporary box when the control box is gone.
+    """
     log = f"{config.storage.mount}/runs/{config.run_id}.launch.log"
     stop = f" --until {until}" if until is not None else ""
-    return (
-        f"cd {PACKAGE_DIR} && nohup {CLI} run {config_path} --repo-root {PACKAGE_DIR}"
-        f"{stop} >> {log} 2>&1 &"
-    )
+    script = f"{CLI} run {config_path} --repo-root {PACKAGE_DIR}{stop}"
+    if control_box_id and not keep_control:
+        script += f"; {CLI} release-control {config_path} {control_box_id}"
+    return f"cd {PACKAGE_DIR} && nohup sh -c {shlex.quote(script)} >> {log} 2>&1 &"
 
 
 def launch(
-    config: RunConfig, config_path: str, box: Box, env: Mapping[str, str], until: int | None = None
+    config: RunConfig,
+    config_path: str,
+    box: Box,
+    env: Mapping[str, str],
+    until: int | None = None,
+    *,
+    keep_control: bool = False,
 ) -> str:
     """Start the run. The keys live only in that process's environment."""
-    cmd = launch_command(config, config_path, until)
+    cmd = launch_command(
+        config, config_path, until, control_box_id=box.box_id, keep_control=keep_control
+    )
     box.start(cmd, env=env)
     return cmd
+
+
+def other_runs(proc: Path = Path("/proc"), own_pid: int | None = None) -> tuple[int, ...]:
+    """Pids of ``autoresearch run`` processes on this machine other than ``own_pid``.
+
+    Read from /proc and matched on whole argv elements, not on a substring of the
+    command line: the ``sh -c`` wrapping a launch carries the entire script as one
+    argument, and counting it would keep every control box alive forever.
+    """
+    if not proc.is_dir():
+        return ()
+    own = os.getpid() if own_pid is None else own_pid
+    found: list[int] = []
+    for entry in proc.iterdir():
+        if not entry.name.isdigit() or int(entry.name) == own:
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        words = [w.decode(errors="replace") for w in raw.split(b"\0")]
+        if any(Path(w).name == "autoresearch" and n == "run" for w, n in pairwise(words)):
+            found.append(int(entry.name))
+    return tuple(sorted(found))
 
 
 def remote_status(config: RunConfig, box: Box) -> str:

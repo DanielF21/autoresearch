@@ -21,6 +21,7 @@ the box. One unreachable box then costs one attempt instead of the whole run.
 
 from __future__ import annotations
 
+import datetime as dt
 import threading
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -38,6 +39,11 @@ ROLE_SIZES = {"worker": "worker_size", "referee": "referee_size", "control": "co
 RUN_GRACE_S = 120
 # For the calls that carry no timeout of their own: file transfers, terminate.
 SDK_DEADLINE_S = 300
+APP_NAME = "autoresearch"
+CREATE_TIMEOUT_S = 1800
+# How far before a failed create a box of the same name may be stamped and still
+# count as the one that create brought up. Covers clock skew between host and Sail.
+CLOCK_SLACK = dt.timedelta(minutes=5)
 
 
 def _guarded[T](what: str, deadline: float, call: Callable[[], T]) -> T:
@@ -138,10 +144,45 @@ class SailBox:
         _guarded(f"terminate {self.name}", SDK_DEADLINE_S, lambda: self._sb.terminate())
 
 
+@dataclass(frozen=True)
+class LiveBox:
+    """A box in the app that is not terminated, as ``reap`` lists it."""
+
+    box_id: str
+    name: str
+    status: str
+    created_at: str
+
+
+def live_boxes(app_name: str = APP_NAME, prefix: str = "") -> list[LiveBox]:
+    """Every box in the app that is not terminated, oldest first, optionally by name prefix."""
+    import sail
+
+    app = sail.App.find(app_name, mint_if_missing=True)
+    rows = _guarded("list boxes", SDK_DEADLINE_S, lambda: sail.Sailbox.list(app_id=app))
+    live = [
+        LiveBox(
+            box_id=str(sb.sailbox_id),
+            name=str(sb.name),
+            status=str(sb.status),
+            created_at=str(getattr(sb, "created_at", "")),
+        )
+        for sb in rows
+        if str(sb.status) != "terminated" and str(sb.name).startswith(prefix)
+    ]
+    return sorted(live, key=lambda b: b.created_at)
+
+
+def terminate_box(box_id: str) -> None:
+    import sail
+
+    _guarded(f"terminate {box_id}", SDK_DEADLINE_S, lambda: sail.Sailbox.get(box_id).terminate())
+
+
 class SailBoxFactory:
     """Creates boxes from the run's image. One instance per orchestrator process."""
 
-    def __init__(self, config: RunConfig, app_name: str = "autoresearch") -> None:
+    def __init__(self, config: RunConfig, app_name: str = APP_NAME) -> None:
         import sail
 
         from autoresearch.boxes.image import build_image
@@ -150,6 +191,59 @@ class SailBoxFactory:
         self._config = config
         self._app = sail.App.find(app_name, mint_if_missing=True)
         self._image = build_image(config.target)
+
+    def _create(self, name: str, what: str, **kwargs: Any) -> Box:
+        """Create a box that never sleeps, and clean up after a create that raised."""
+        since = dt.datetime.now(dt.UTC)
+        try:
+            sb = self._sail.Sailbox.create(
+                app=self._app,
+                name=name,
+                image=self._image,
+                auto_sleep=self._sail.AutoSleep.never(),
+                timeout=CREATE_TIMEOUT_S,
+                **kwargs,
+            )
+        except Exception as e:
+            leftover = self._end_late_arrival(name, since)
+            raise BoxError(f"create {what} failed: {e!r}{leftover}") from e
+        return SailBox(sb)
+
+    def _end_late_arrival(self, name: str, since: dt.datetime) -> str:
+        """Terminate a box that came up although its create raised. A suffix for the error.
+
+        The SDK says a create that times out raises "and the Sailbox may still come
+        up in the background". Nothing would hold a handle to that box, and it
+        never sleeps. This finds one that is up by the time the error is handled,
+        by exact name among boxes created since the call. One still queued is not
+        seen yet, which is what ``autoresearch reap`` is for.
+        """
+        reap = "; check with autoresearch reap"
+        try:
+            found = _guarded(
+                f"list {name}",
+                SDK_DEADLINE_S,
+                lambda: self._sail.Sailbox.list(app_id=self._app, search=name),
+            )
+        except BoxError as e:
+            return f"; could not look for a box that came up anyway ({e}){reap}"
+        ended: list[str] = []
+        for sb in found:
+            if str(sb.name) != name or str(sb.status) == "terminated":
+                continue
+            created = getattr(sb, "created_at", None)
+            if (
+                isinstance(created, dt.datetime)
+                and created.tzinfo is not None
+                and created < since - CLOCK_SLACK
+            ):
+                continue
+            try:
+                _guarded(f"terminate {name}", SDK_DEADLINE_S, sb.terminate)
+            except BoxError as e:
+                return f"; {sb.sailbox_id} came up anyway and did not terminate ({e}){reap}"
+            ended.append(str(sb.sailbox_id))
+        return f"; terminated {', '.join(ended)}, which came up anyway" if ended else ""
 
     def create(self, *, name: str, role: str) -> Box:
         """A worker or referee box. Never sleeps, for the same reason the control box does not.
@@ -164,37 +258,26 @@ class SailBoxFactory:
         sleep. The wall clock guard in ``SailBox.run`` is the other half of this.
         """
         size = getattr(self._config.boxes, ROLE_SIZES[role])
-        try:
-            sb = self._sail.Sailbox.create(
-                app=self._app,
-                name=name,
-                image=self._image,
-                size=size,
-                disk_limit_gib=self._config.boxes.disk_gib,
-                auto_sleep=self._sail.AutoSleep.never(),
-                timeout=1800,
-            )
-        except Exception as e:
-            raise BoxError(f"create {name} ({role}, size {size}) failed: {e!r}") from e
-        return SailBox(sb)
+        return self._create(
+            name,
+            f"{name} ({role}, size {size})",
+            size=size,
+            disk_limit_gib=self._config.boxes.disk_gib,
+        )
 
     def create_control(self, *, name: str, volume: str, mount: str) -> Box:
         """The control box: never sleeps, with the run volume mounted at ``mount``."""
         try:
             vol = self._sail.Volume.find(volume, mint_if_missing=True)
-            sb = self._sail.Sailbox.create(
-                app=self._app,
-                name=name,
-                image=self._image,
-                size=self._config.boxes.control_size,
-                disk_limit_gib=self._config.boxes.disk_gib,
-                volumes={mount: vol},
-                auto_sleep=self._sail.AutoSleep.never(),
-                timeout=1800,
-            )
         except Exception as e:
             raise BoxError(f"create control box {name} failed: {e!r}") from e
-        return SailBox(sb)
+        return self._create(
+            name,
+            f"control box {name}",
+            size=self._config.boxes.control_size,
+            disk_limit_gib=self._config.boxes.disk_gib,
+            volumes={mount: vol},
+        )
 
     def reattach(self, box_id: str) -> Box | None:
         try:

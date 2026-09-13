@@ -65,12 +65,52 @@ def test_launch_starts_a_detached_run_with_the_keys_only_in_env() -> None:
     envs = {"SAIL_API_KEY": "sk_secret", "LANGFUSE_SECRET_KEY": "sk-lf-secret"}
     cmd = ctl.launch(CFG, "configs/t1_w4d.toml", box, envs)
     assert box.started == [(cmd, envs)]
-    assert cmd.startswith(f"cd {ctl.PACKAGE_DIR} && nohup {ctl.CLI} run configs/t1_w4d.toml")
+    assert cmd.startswith(f"cd {ctl.PACKAGE_DIR} && nohup sh -c ")
+    assert f"{ctl.CLI} run configs/t1_w4d.toml" in cmd
     assert "/mnt/autoresearch/runs/t1_w4d.launch.log" in cmd and cmd.endswith("&")
     # No key may reach the command line: it is visible to anything reading ps.
     assert "sk_secret" not in cmd and "sk-lf-secret" not in cmd
     cmd = ctl.launch(CFG, "configs/t1_w4d.toml", FakeBox(), {"SAIL_API_KEY": "k"}, until=1)
-    assert " --until 1 >>" in cmd
+    assert " --until 1;" in cmd
+
+
+def test_a_launched_run_is_followed_by_releasing_the_control_box() -> None:
+    cmd = ctl.launch(
+        CFG, "configs/t1_w4d.toml", FakeBox(box_id="sb_control"), {"SAIL_API_KEY": "k"}
+    )
+    release = f"; {ctl.CLI} release-control configs/t1_w4d.toml sb_control"
+    # ";" and not "&&": a run that fails leaves just as idle a control box.
+    assert release in cmd
+    assert cmd.index(" run configs/t1_w4d.toml") < cmd.index(release)
+    kept = ctl.launch(
+        CFG, "configs/t1_w4d.toml", FakeBox(box_id="sb_control"), {"k": "v"}, keep_control=True
+    )
+    assert "release-control" not in kept
+
+
+def _proc(root: Path, pid: int, *argv: str) -> None:
+    (root / str(pid)).mkdir(parents=True)
+    (root / str(pid) / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+
+
+def test_other_runs_counts_run_processes_and_not_the_launch_shell(tmp_path: Path) -> None:
+    proc = tmp_path / "proc"
+    _proc(proc, 10, "python3", "-m", "autoresearch", "run", "configs/a.toml")
+    _proc(proc, 11, "/v/bin/autoresearch", "run", "configs/b.toml")
+    _proc(
+        proc,
+        12,
+        "sh",
+        "-c",
+        "python3 -m autoresearch run configs/a.toml; "
+        "python3 -m autoresearch release-control configs/a.toml sb_1",
+    )
+    _proc(proc, 13, "python3", "-m", "autoresearch", "release-control", "configs/a.toml", "sb_1")
+    _proc(proc, 14, "python3", "-m", "autoresearch", "status", "run")
+    (proc / "self").mkdir()
+    assert ctl.other_runs(proc, own_pid=13) == (10, 11)
+    assert ctl.other_runs(proc, own_pid=10) == (11,)
+    assert ctl.other_runs(tmp_path / "no_proc", own_pid=1) == ()
 
 
 def test_nothing_in_a_box_calls_the_console_script(tmp_path: Path) -> None:

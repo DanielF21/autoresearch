@@ -17,9 +17,9 @@ Caps and kill rules, each recorded as the stop reason:
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import time
-from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -55,6 +55,25 @@ class _Transcript:
 
 def _clip(s: str, n: int = TRANSCRIPT_CLIP) -> str:
     return s if len(s) <= n else s[:n] + f"... [{len(s) - n} more]"
+
+
+def _release(box: Box) -> None:
+    """Terminate a worker box. The one place a BoxError is reported rather than raised.
+
+    This runs after the attempt's result is built, so raising would discard a
+    finished attempt, patch and all, and take the round down with it. A box that
+    will not terminate is still a leak that never sleeps, so it is said on
+    stderr, which the run's launch log keeps, with the command that finds it.
+    """
+    try:
+        box.terminate()
+    except BoxError as e:
+        print(
+            f"worker box {box.name} ({box.box_id}) may still be running: {e}. "
+            "autoresearch reap lists every live box.",
+            file=sys.stderr,
+            flush=True,
+        )
 
 
 def _call_signature(call: ToolCall) -> str:
@@ -208,7 +227,7 @@ class AgentLoopWorker:
             python = self._prepare_box(box, inp)
         except BoxError as e:
             if box is not None:
-                box.terminate()
+                _release(box)
             return finish(StopReason.BOX_ERROR, error=str(e))
 
         ctx = tools.ToolContext(box=box, target=inp.target)
@@ -295,11 +314,4 @@ class AgentLoopWorker:
         except BoxError as e:
             return finish(StopReason.BOX_ERROR, error=str(e))
         finally:
-            # The one place a BoxError is swallowed. This runs after the return
-            # value is built, so raising here would discard a finished attempt,
-            # patch and all, and take the round down with it: the orchestrator
-            # maps over the workers and one raising ends the round. A box that
-            # will not terminate is a leak, visible in Sailbox.list and billed
-            # until autosleep, which is worth less than the attempt.
-            with suppress(BoxError):
-                box.terminate()
+            _release(box)

@@ -30,6 +30,29 @@ scripts/check.sh        # ruff format, ruff lint, mypy strict, pytest
 
 `SAIL_API_KEY` is read from `.env`, which is not committed.
 
+## Nothing left running
+
+Every box is created with auto sleep off, so a box nobody terminates bills until
+someone does. The harness terminates each one when the process holding it exits,
+however it exits:
+
+- `run` terminates its referees on every exit: the last round, `--until`, an
+  exception, Ctrl+C, SIGTERM or SIGHUP. A resumed run builds new ones, and first
+  terminates any a killed run left named in `boxes.json`.
+- A worker terminates its own box at the end of every attempt.
+- `check`, `measure` and `calibrate.py` terminate their box unless `--keep`.
+- A launched run is followed by `release-control`, which terminates the control
+  box once no run is going on it, unless launched with `--keep-control`. `fetch`
+  brings up a temporary box on the volume when the control box is gone.
+
+No code in a process survives `kill -9`, a dead laptop or a lost control box. After
+any of those:
+
+```
+uv run autoresearch reap          # every live box in the app
+uv run autoresearch reap --yes    # terminate them all, including any run still going
+```
+
 ## Adding a target
 
 A target is a `[target]` section. Every fact the harness needs is in it:

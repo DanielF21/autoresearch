@@ -14,10 +14,11 @@ from __future__ import annotations
 import datetime as dt
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from autoresearch import history
-from autoresearch.boxes.protocol import BoxFactory
+from autoresearch.boxes.protocol import BoxError, BoxFactory
 from autoresearch.config import RunConfig
 from autoresearch.orchestrator.pool import RefereePool
 from autoresearch.orchestrator.round import run_round
@@ -91,6 +92,17 @@ def check_consistent(paths: history.RunPaths, config: RunConfig) -> int:
     return last + 1
 
 
+def _log_teardown(log: Path | None, failures: tuple[str, ...]) -> None:
+    """Every referee that may still be running, to the run log and to stderr."""
+    if not failures:
+        _log(log, f"referee boxes terminated at {_now()}")
+        return
+    for line in failures:
+        message = f"referee box may still be running: {line}"
+        _log(log, message)
+        print(message, file=sys.stderr, flush=True)
+
+
 def run(
     config: RunConfig,
     paths: history.RunPaths,
@@ -102,42 +114,69 @@ def run(
 ) -> int:
     """Run rounds from the next incomplete one to ``until_round`` or the config's total.
 
-    Returns the last completed round. Referee boxes stay alive between rounds
-    and are terminated when the configured number of rounds is reached.
+    Returns the last completed round. Every referee box is terminated before this
+    returns or raises, whatever ended it: the last round, ``until_round``, an
+    exception, or a signal ``autoresearch.shutdown`` turned into one. Nothing is
+    kept for a later launch, which builds its own referees. A box that will not
+    terminate is logged, left in boxes.json, and raised as a BoxError, except
+    when an exception is already on its way out, which is never replaced.
     """
     history.acquire_lock(paths)
+    pool = RefereePool(config, paths, boxes)
     try:
-        start = check_consistent(paths, config)
-        stop = min(config.rounds, until_round or config.rounds)
-        if start > stop:
-            return start - 1
-        pool = RefereePool(config, paths, boxes)
-        pool.start()
-        last = start - 1
-        for round_no in range(start, stop + 1):
-            # A start line, not only a finish line. The log used to gain nothing
-            # until a round completed, so a round that never completed was
-            # indistinguishable from one that had not started, and a stalled run
-            # looked exactly like a slow one. Timestamped, so how long a round
-            # has been going is readable without attaching to the process.
-            _log(log, f"round {round_no}: workers started at {_now()}")
-            outcome = run_round(round_no, config, paths, worker, pool)
-            last = round_no
-            commit_run(paths, f"round {round_no}")
-            r = outcome.record
-            best = "none" if r.best_ratio_so_far is None else f"{r.best_ratio_so_far:.4f}"
-            slower = sorted(n for n, m in outcome.measurements.items() if m.regressions)
-            _log(
-                log,
-                f"round {r.round}: attempts {list(r.attempt_numbers)} measured "
-                f"{list(r.measured_numbers)} real speedups {list(r.clears_noise_numbers)} "
-                f"slower somewhere {slower} "
-                f"best so far {best} worker {r.worker_wall_s:.0f}s referee "
-                f"{r.referee_wall_s:.0f}s errors {len(r.errors)} done at {_now()}",
-            )
+        try:
+            last = _rounds(config, paths, worker, pool, until_round, log)
+        except BaseException:
+            _log_teardown(log, pool.terminate_all())
+            raise
+        failures = pool.terminate_all()
+        _log_teardown(log, failures)
         if last >= config.rounds:
-            pool.terminate_all()
             commit_run(paths, "run complete")
+        if failures:
+            raise BoxError(
+                f"{len(failures)} referee boxes may still be running, recorded in "
+                f"{paths.boxes}: {'; '.join(failures)}"
+            )
         return last
     finally:
         history.release_lock(paths)
+
+
+def _rounds(
+    config: RunConfig,
+    paths: history.RunPaths,
+    worker: Worker,
+    pool: RefereePool,
+    until_round: int | None,
+    log: Path | None,
+) -> int:
+    """The rounds themselves. Teardown is the caller's, so no exit path here can skip it."""
+    start = check_consistent(paths, config)
+    stop = min(config.rounds, until_round or config.rounds)
+    if start > stop:
+        return start - 1
+    pool.start()
+    last = start - 1
+    for round_no in range(start, stop + 1):
+        # A start line, not only a finish line. The log used to gain nothing
+        # until a round completed, so a round that never completed was
+        # indistinguishable from one that had not started, and a stalled run
+        # looked exactly like a slow one. Timestamped, so how long a round
+        # has been going is readable without attaching to the process.
+        _log(log, f"round {round_no}: workers started at {_now()}")
+        outcome = run_round(round_no, config, paths, worker, pool)
+        last = round_no
+        commit_run(paths, f"round {round_no}")
+        r = outcome.record
+        best = "none" if r.best_ratio_so_far is None else f"{r.best_ratio_so_far:.4f}"
+        slower = sorted(n for n, m in outcome.measurements.items() if m.regressions)
+        _log(
+            log,
+            f"round {r.round}: attempts {list(r.attempt_numbers)} measured "
+            f"{list(r.measured_numbers)} real speedups {list(r.clears_noise_numbers)} "
+            f"slower somewhere {slower} "
+            f"best so far {best} worker {r.worker_wall_s:.0f}s referee "
+            f"{r.referee_wall_s:.0f}s errors {len(r.errors)} done at {_now()}",
+        )
+    return last

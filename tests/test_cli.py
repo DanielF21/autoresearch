@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from autoresearch import history
+from autoresearch import env, history
 from autoresearch.cli import build_parser, main
 from autoresearch.types import AttemptRef, InputTiming, Measurement, SuiteResult
 from tests.helpers import diff_for, submitted
@@ -19,8 +19,35 @@ def test_no_command_prints_help_and_exits_2(capsys: pytest.CaptureFixture[str]) 
 def test_every_command_is_registered() -> None:
     parser = build_parser()
     text = parser.format_help()
-    for name in ("status", "run", "measure", "check", "deploy", "launch", "remote-status", "fetch"):
+    for name in (
+        "status",
+        "run",
+        "measure",
+        "check",
+        "reap",
+        "deploy",
+        "launch",
+        "remote-status",
+        "fetch",
+        "release-control",
+    ):
         assert name in text
+
+
+def test_reap_lists_and_terminates_only_with_yes(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from autoresearch.boxes import sail_box
+
+    live = [sail_box.LiveBox("sb_1", "referee-x-0", "running", "2026-09-13 02:28:51+00:00")]
+    ended: list[str] = []
+    monkeypatch.setattr(env, "load_dotenv", lambda *a, **k: None)
+    monkeypatch.setattr(sail_box, "live_boxes", lambda prefix="": live)
+    monkeypatch.setattr(sail_box, "terminate_box", ended.append)
+    assert main(["reap"]) == 0
+    assert "referee-x-0" in capsys.readouterr().out and ended == []
+    assert main(["reap", "--yes"]) == 0
+    assert ended == ["sb_1"] and "terminated referee-x-0" in capsys.readouterr().out
 
 
 def test_run_and_measure_refuse_an_uncalibrated_config_by_name(

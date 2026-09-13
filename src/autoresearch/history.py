@@ -6,7 +6,8 @@ Layout, relative to the run directory:
     target/               files the worker is shown about the target
     attempts/NNNN/        one directory per attempt, written once
     rounds.jsonl          one record per completed round
-    boxes.json            live box ids, rewritten on change
+    boxes.json            referee box ids while held, and any that failed to terminate;
+                          the next launch terminates whatever it names
     LOCK                  owner of the running orchestrator
 
 An attempt directory is written by ``write_attempt`` and never modified, except

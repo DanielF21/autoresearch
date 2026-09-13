@@ -2,7 +2,12 @@
 
 Local commands, which never touch Sail: ``status``.
 Commands that create boxes or call the model: ``run``, ``measure``, ``check``.
-Control box commands: ``deploy``, ``launch``, ``remote-status``, ``fetch``.
+Control box commands: ``deploy``, ``launch``, ``remote-status``, ``fetch``,
+and ``release-control``, which a launch runs after its run ends.
+The backstop for a process that died without cleanup: ``reap``.
+
+Every command but ``status`` turns SIGTERM and SIGHUP into a clean exit, so a
+killed process still terminates the boxes it holds. See ``shutdown``.
 
 ``check`` is how a target is admitted: one referee box, no patch, no model.
 It surveys the base tree and judges it against the rules in
@@ -22,7 +27,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from autoresearch import env, history
+from autoresearch import env, history, shutdown
 from autoresearch.config import RunConfig, load_config
 from autoresearch.orchestrator import status as status_mod
 
@@ -183,6 +188,40 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 1 if any(v.failed for v in verdicts) else 0
 
 
+def cmd_reap(args: argparse.Namespace) -> int:
+    """List every live box in the app; terminate them with --yes.
+
+    The backstop for what no process can clean up after itself: ``kill -9``, a
+    dead laptop, a lost control box, a create that raised and came up later.
+    """
+    from autoresearch.boxes import sail_box
+    from autoresearch.boxes.protocol import BoxError
+
+    env.load_dotenv()
+    live = sail_box.live_boxes(prefix=args.prefix)
+    if not live:
+        print("no live boxes")
+        return 0
+    for b in live:
+        print(f"{b.name}  {b.box_id}  {b.status}  created {b.created_at}")
+    if not args.yes:
+        print(
+            f"\n{len(live)} live, nothing terminated. --yes terminates every one listed, "
+            "including any run still going."
+        )
+        return 0
+    failed = 0
+    for b in live:
+        try:
+            sail_box.terminate_box(b.box_id)
+        except BoxError as e:
+            failed += 1
+            print(f"did not terminate {b.name} ({b.box_id}): {e}", file=sys.stderr)
+            continue
+        print(f"terminated {b.name}")
+    return 1 if failed else 0
+
+
 # ----- parser ------------------------------------------------------------------------
 
 
@@ -217,6 +256,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--keep", action="store_true", help="leave the box running")
     p.set_defaults(func=cmd_check)
 
+    p = sub.add_parser("reap", help="list every live box in the app, and terminate them with --yes")
+    p.add_argument("--prefix", default="", help="only boxes whose name starts with this")
+    p.add_argument("--yes", action="store_true", help="terminate every box listed")
+    p.set_defaults(func=cmd_reap)
+
     try:
         from autoresearch.control import commands as control
 
@@ -232,6 +276,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 2
+    if args.command != "status":
+        shutdown.exit_cleanly_on_signals()
     result: int = args.func(args)
     return result
 

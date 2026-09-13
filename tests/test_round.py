@@ -19,7 +19,8 @@ from autoresearch.config import RunConfig, load_config
 from autoresearch.orchestrator import run as run_mod
 from autoresearch.orchestrator.pool import RefereePool
 from autoresearch.orchestrator.round import NO_PATCH, run_round
-from autoresearch.types import AttemptRef
+from autoresearch.types import AttemptRef, WorkerOutput
+from autoresearch.worker.protocol import WorkerInput
 from tests.helpers import BASE_SHA, FakeWorker, diff_for, referee_box, submitted
 
 ROOT = Path(__file__).parent.parent
@@ -157,16 +158,113 @@ def test_run_loop_resumes_after_the_last_completed_round(tmp_path: Path) -> None
     assert run_mod.run(cfg, paths, worker, factory, until_round=1) == 1
     assert history.last_completed_round(paths) == 1
     assert not paths.lock.exists()
-    assert factory.created[0].terminated is False  # referees persist between calls
+    # Stopping early keeps nothing: a box left for a resume bills until one comes.
+    assert [b.terminated for b in factory.created] == [True]
+    assert history.read_boxes(paths) == {}
 
     assert run_mod.run(cfg, paths, worker, factory) == 3
     assert [r.round for r in history.read_rounds(paths)] == [1, 2, 3]
-    assert all(b.terminated for b in factory.created)  # run complete: boxes released
+    assert len(factory.created) == 2  # the resume built its own referee
+    assert all(b.terminated for b in factory.created)
     log = subprocess.run(
         ["git", "log", "--oneline"], cwd=paths.root, capture_output=True, text=True
     ).stdout
     assert "round 3" in log and "run initialised" in log
     assert not (paths.root / "incumbent").exists()
+
+
+class RaisingWorker:
+    def __init__(self, error: BaseException) -> None:
+        self.error = error
+
+    def attempt(self, inp: WorkerInput) -> WorkerOutput:
+        raise self.error
+
+
+@pytest.mark.parametrize("error", [RuntimeError("worker bug"), SystemExit(143)])
+def test_run_terminates_referees_when_a_round_raises(tmp_path: Path, error: BaseException) -> None:
+    """SystemExit is what ``shutdown`` turns SIGTERM and SIGHUP into."""
+    cfg = make_config(2)
+    paths = run_mod.init_run(cfg, tmp_path / "run", ())
+    factory = make_factory({})
+    with pytest.raises(type(error)):
+        run_mod.run(cfg, paths, RaisingWorker(error), factory)
+    assert len(factory.created) == 2 and all(b.terminated for b in factory.created)
+    assert history.read_boxes(paths) == {}
+    assert not paths.lock.exists()
+
+
+def test_a_referee_that_fails_setup_is_terminated(tmp_path: Path) -> None:
+    cfg = make_config(1)
+    paths = run_mod.init_run(cfg, tmp_path / "run", ())
+
+    def prepare(box: FakeBox, role: str) -> None:
+        def explode(_cmd: str) -> object:
+            raise BoxError("setup lost the host")
+
+        box.on("", explode)  # type: ignore[arg-type]
+
+    factory = FakeBoxFactory(prepare=prepare)
+    with pytest.raises(BoxError, match="setup lost the host"):
+        run_mod.run(cfg, paths, FakeWorker([]), factory)
+    assert len(factory.created) == 1 and factory.created[0].terminated
+    assert history.read_boxes(paths) == {}
+    assert not paths.lock.exists()
+
+
+def test_the_next_launch_terminates_what_a_killed_orchestrator_left(tmp_path: Path) -> None:
+    cfg = make_config(1)
+    paths = run_mod.init_run(cfg, tmp_path / "run", ())
+    factory = make_factory({})
+    orphan = factory.create(name="referee-killed-0", role="referee")
+    assert isinstance(orphan, FakeBox)
+    history.write_boxes(paths, {"referee:0": orphan.box_id})
+
+    pool = RefereePool(cfg, paths, factory)
+    pool.start()
+    assert orphan.terminated
+    assert history.read_boxes(paths) == {"referee:0": factory.created[1].box_id}
+    assert pool.terminate_all() == ()
+    assert history.read_boxes(paths) == {}
+
+
+def test_a_finished_run_still_terminates_what_a_killed_launch_left(tmp_path: Path) -> None:
+    """The early return for a complete run never starts the pool, and must not skip this."""
+    cfg = make_config(1)
+    paths = run_mod.init_run(cfg, tmp_path / "run", ())
+    factory = make_factory({})
+    worker = FakeWorker([submitted(None), submitted(None), submitted(None)])
+    assert run_mod.run(cfg, paths, worker, factory) == 3
+    orphan = factory.create(name="referee-killed-0", role="referee")
+    assert isinstance(orphan, FakeBox)
+    history.write_boxes(paths, {"referee:0": orphan.box_id})
+    assert run_mod.run(cfg, paths, worker, factory) == 3
+    assert orphan.terminated and history.read_boxes(paths) == {}
+
+
+def test_a_referee_that_will_not_terminate_is_logged_kept_and_raised(tmp_path: Path) -> None:
+    cfg = make_config(1)
+    paths = run_mod.init_run(cfg, tmp_path / "run", ())
+    factory = make_factory({})
+    referee = factory.prepare
+    assert referee is not None
+
+    def prepare(box: FakeBox, role: str) -> None:
+        referee(box, role)
+
+        def stuck() -> None:
+            raise BoxError("terminate did not return within 300s")
+
+        box.terminate = stuck  # type: ignore[method-assign]
+
+    factory.prepare = prepare
+    log = tmp_path / "run.log"
+    with pytest.raises(BoxError, match="may still be running"):
+        run_mod.run(cfg, paths, FakeWorker([submitted(None)]), factory, until_round=1, log=log)
+    assert list(history.read_boxes(paths).values()) == [factory.created[0].box_id]
+    assert "referee box may still be running" in log.read_text()
+    assert history.last_completed_round(paths) == 1
+    assert not paths.lock.exists()
 
 
 def test_half_written_round_refuses_to_resume(tmp_path: Path) -> None:

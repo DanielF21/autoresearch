@@ -28,7 +28,7 @@ import statistics
 import sys
 from pathlib import Path
 
-from autoresearch import env
+from autoresearch import env, shutdown
 from autoresearch.config import load_config
 from autoresearch.referee import timing
 from autoresearch.referee.thresholds import null_threshold
@@ -84,6 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     from autoresearch.boxes.sail_box import SailBoxFactory
     from autoresearch.referee.referee import Referee
 
+    shutdown.exit_cleanly_on_signals()
     env.load_dotenv()
     cfg = load_config(Path(args.config))
     only = tuple(i.name for i in cfg.target.inputs if i.name not in args.skip)
