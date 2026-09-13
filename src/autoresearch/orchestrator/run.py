@@ -179,4 +179,19 @@ def _rounds(
             f"best so far {best} worker {r.worker_wall_s:.0f}s referee "
             f"{r.referee_wall_s:.0f}s errors {len(r.errors)} done at {_now()}",
         )
+        if len(r.errors) >= config.width:
+            # Every worker failed before the model could work: a box that would
+            # not come up, or a model endpoint that refused. That is the platform,
+            # not the experiment, and it takes seconds per attempt, so a run left
+            # alone would spend its remaining rounds recording nothing. In t1_w4c
+            # round 2 all four workers lost their box within twenty seconds and
+            # round 3 started at once. The round is on disk and committed, so
+            # the run resumes from the next one when the cause is gone.
+            message = (
+                f"round {round_no}: every one of {config.width} workers failed; stopping "
+                f"so the remaining rounds are not spent on a platform fault. "
+                f"First error: {r.errors[0][:300]}"
+            )
+            _log(log, message)
+            raise RunError(message)
     return last

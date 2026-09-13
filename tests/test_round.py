@@ -19,7 +19,7 @@ from autoresearch.config import RunConfig, load_config
 from autoresearch.orchestrator import run as run_mod
 from autoresearch.orchestrator.pool import RefereePool
 from autoresearch.orchestrator.round import NO_PATCH, run_round
-from autoresearch.types import AttemptRef, WorkerOutput
+from autoresearch.types import AttemptRef, StopReason, WorkerOutput
 from autoresearch.worker.protocol import WorkerInput
 from tests.helpers import BASE_SHA, FakeWorker, diff_for, referee_box, submitted
 
@@ -179,6 +179,41 @@ class RaisingWorker:
 
     def attempt(self, inp: WorkerInput) -> WorkerOutput:
         raise self.error
+
+
+def _box_error() -> WorkerOutput:
+    return replace(
+        submitted(None),
+        stop_reason=StopReason.BOX_ERROR,
+        error="create worker-x failed: quota",
+        turns=1,
+    )
+
+
+def test_a_round_in_which_every_worker_fails_stops_the_run(tmp_path: Path) -> None:
+    """A platform fault costs seconds per attempt; unattended, it would eat every round."""
+    cfg = make_config(2)
+    paths = run_mod.init_run(cfg, tmp_path / "run", ())
+    factory = make_factory({})
+    log = tmp_path / "run.log"
+    with pytest.raises(run_mod.RunError, match="every one of 2 workers failed"):
+        run_mod.run(cfg, paths, FakeWorker([_box_error()]), factory, log=log)
+    # The failed round is still the record, the referees are gone, and a resume
+    # starts at round 2.
+    assert [r.round for r in history.read_rounds(paths)] == [1]
+    assert len(history.load_history(paths)) == 2
+    assert all(b.terminated for b in factory.created)
+    assert not paths.lock.exists()
+    assert "quota" in log.read_text()
+
+
+def test_one_failed_worker_among_two_does_not_stop_the_run(tmp_path: Path) -> None:
+    cfg = make_config(2)
+    paths = run_mod.init_run(cfg, tmp_path / "run", ())
+    factory = make_factory({"x = fast": 1.05})
+    worker = FakeWorker([_box_error(), submitted(diff_for("fast"))] * 3)
+    assert run_mod.run(cfg, paths, worker, factory) == 3
+    assert [r.round for r in history.read_rounds(paths)] == [1, 2, 3]
 
 
 @pytest.mark.parametrize("error", [RuntimeError("worker bug"), SystemExit(143)])
