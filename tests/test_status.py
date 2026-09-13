@@ -4,6 +4,7 @@ from autoresearch import history
 from autoresearch.orchestrator.status import compute_status
 from autoresearch.types import (
     AttemptRef,
+    InputTiming,
     Measurement,
     RoundRecord,
     SuiteResult,
@@ -16,15 +17,20 @@ FLOOR = 1.0106
 
 def _measurement(ratio: float | None, tests_ok: bool = True, matches: bool = True) -> Measurement:
     return Measurement(
-        noise_floor=FLOOR,
         applied=True,
         tests=(
             SuiteResult("module", 10, 0 if tests_ok else 1, 0, 1.0, tests_ok),
             SuiteResult("full", 100, 0 if tests_ok else 1, 0, 60.0, tests_ok),
         ),
-        base_fp="a",
-        patched_fp="a" if matches else "b",
-        speedup=ratio,
+        inputs=(
+            InputTiming(
+                name="bench",
+                noise_floor=FLOOR,
+                base_fp="a",
+                patched_fp="a" if matches else "b",
+                speedup=ratio,
+            ),
+        ),
     )
 
 

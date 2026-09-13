@@ -1,0 +1,19 @@
+Callers for the same profile: nx.clustering(G) with G = nx.erdos_renyi_graph(1000, 0.05, seed=42, directed=True)
+
+   Ordered by: internal time
+   List reduced from 18 to 10 due to restriction <10>
+
+Function                                                                                                                   was called by...
+                                                                                                                               ncalls  tottime  cumtime
+networkx/algorithms/cluster.py:160(_directed_triangles_and_degree_iter)  <-    1001    0.840    0.996  networkx/algorithms/cluster.py:384(clustering)
+networkx/algorithms/cluster.py:180(<genexpr>)                            <- 1083208    0.094    0.094  {built-in method builtins.sum}
+{built-in method builtins.sum}                                                                                             <-   99508    0.062    0.156  networkx/algorithms/cluster.py:160(_directed_triangles_and_degree_iter)
+networkx/algorithms/cluster.py:384(clustering)                           <-       1    0.000    0.996  networkx/utils/backends.py:541(_call_if_no_backends_installed)
+{built-in method builtins.len}                                                                                             <-    3000    0.000    0.000  networkx/algorithms/cluster.py:160(_directed_triangles_and_degree_iter)
+networkx/algorithms/cluster.py:170(<genexpr>)                            <-    1001    0.000    0.000  networkx/algorithms/cluster.py:160(_directed_triangles_and_degree_iter)
+{built-in method builtins.eval}                                                                                            <- 
+{method 'disable' of '_lsprof.Profiler' objects}                                                                           <- 
+networkx/utils/backends.py:541(_call_if_no_backends_installed)           <-       1    0.000    0.996  <class 'networkx.utils.decorators.argmap'> compilation 21:1(argmap_clustering_18)
+<class 'networkx.utils.decorators.argmap'> compilation 21:1(argmap_clustering_18)                                          <-       1    0.000    0.996  <string>:1(<module>)
+
+

@@ -6,6 +6,7 @@ import pytest
 from autoresearch.types import (
     Attempt,
     AttemptRef,
+    InputTiming,
     Measurement,
     PairTiming,
     Prediction,
@@ -16,6 +17,7 @@ from autoresearch.types import (
 from tests.helpers import BASE_SHA
 
 FLOOR = 1.0106
+ONLY = "bench"  # the single input name most of these fixtures use
 
 
 def pair(i: int, base_s: float, patched_s: float, contaminated: bool = False) -> PairTiming:
@@ -29,23 +31,39 @@ def pair(i: int, base_s: float, patched_s: float, contaminated: bool = False) ->
     )
 
 
+def timing(
+    name: str,
+    speedup: float,
+    patched_s: float = 0.1,
+    pairs: tuple[PairTiming, ...] | None = None,
+    floor: float = FLOOR,
+) -> InputTiming:
+    return InputTiming(
+        name=name,
+        noise_floor=floor,
+        base_fp="a",
+        patched_fp="a",
+        speedup=speedup,
+        pairs=pairs if pairs is not None else tuple(pair(i, 1.0, patched_s) for i in range(6)),
+    )
+
+
 def measurement(
     patched_s: float,
     speedup: float,
     tests_ok: bool = True,
     pairs: tuple[PairTiming, ...] | None = None,
+    inputs: tuple[InputTiming, ...] | None = None,
 ) -> Measurement:
     return Measurement(
-        noise_floor=FLOOR,
         applied=True,
         tests=(
             SuiteResult("module", 10, 0 if tests_ok else 1, 0, 1.0, tests_ok),
             SuiteResult("full", 100, 0 if tests_ok else 1, 0, 60.0, tests_ok),
         ),
-        base_fp="a",
-        patched_fp="a",
-        speedup=speedup,
-        pairs=pairs if pairs is not None else tuple(pair(i, 1.0, patched_s) for i in range(6)),
+        inputs=inputs
+        if inputs is not None
+        else (timing(ONLY, speedup, patched_s=patched_s, pairs=pairs),),
     )
 
 
@@ -78,7 +96,7 @@ def test_the_running_best_only_moves_on_a_faster_attempt() -> None:
 
 
 def test_an_attempt_that_fails_its_tests_is_never_progress() -> None:
-    # The fastest wall clock in the run, and it must not touch the line.
+    # The largest speedup in the run, and it must not touch the line.
     rows = analyze.rows(
         (
             attempt(1, measurement(0.50, 2.0)),
@@ -96,32 +114,37 @@ def test_an_attempt_below_the_noise_floor_is_never_progress() -> None:
 
 def test_an_attempt_with_no_patch_has_no_point_to_plot() -> None:
     rows = analyze.rows((attempt(1, None),))
-    assert rows[0].wall_s is None and rows[0].plotted is False and rows[0].record is False
+    assert rows[0].speedup is None and rows[0].plotted is False and rows[0].record is False
 
 
-def test_contaminated_pairs_are_left_out_of_the_wall_clock() -> None:
-    # Same rule the referee uses for the median ratio, so the plotted seconds
-    # and the recorded speedup are taken over the same launches.
+def test_contaminated_pairs_are_left_out_of_the_per_input_wall_clock() -> None:
+    # Same rule the referee uses for the median ratio, so the seconds reported
+    # for an input and its recorded speedup are taken over the same launches.
     pairs = (pair(0, 1.0, 0.50, contaminated=True), pair(1, 1.0, 0.10), pair(2, 1.0, 0.10))
-    assert analyze.median_patched_s(measurement(0.0, 2.0, pairs=pairs)) == 0.10
+    assert analyze.median_patched_s(timing(ONLY, 2.0, pairs=pairs)) == 0.10
 
 
 def test_wall_clock_falls_back_to_every_pair_when_none_is_clean() -> None:
     pairs = (pair(0, 1.0, 0.20, contaminated=True), pair(1, 1.0, 0.40, contaminated=True))
-    m = measurement(0.0, 2.0, pairs=pairs)
-    assert analyze.median_patched_s(m) == pytest.approx(0.30)
-    assert analyze.median_base_s(m) == 1.0
+    t = timing(ONLY, 2.0, pairs=pairs)
+    assert analyze.median_patched_s(t) == pytest.approx(0.30)
+    assert analyze.median_base_s(t) == 1.0
 
 
-def test_the_baseline_is_the_unpatched_tree() -> None:
-    wall = analyze.baseline(
-        (attempt(1, measurement(0.07, 19.5)), attempt(2, measurement(0.05, 27.0)))
-    )
-    assert wall == 1.0
+def test_the_input_columns_are_every_input_seen_in_recording_order() -> None:
+    m = measurement(0.0, 0.0, inputs=(timing("dense", 20.0), timing("sparse", 2.0)))
+    assert analyze.input_names((attempt(1, m),)) == ["dense", "sparse"]
+    # An old run has one unnamed input read back under a fixed name.
+    assert analyze.input_names((attempt(1, measurement(0.1, 2.0)),)) == [ONLY]
 
 
-def test_the_baseline_of_a_run_with_nothing_measured_is_unknown() -> None:
-    assert analyze.baseline((attempt(1, None),)) is None
+def test_a_patch_slower_on_an_input_never_becomes_the_running_best() -> None:
+    """Patch 0010's shape: a large mean carried by one input. artifacts/generality.md."""
+    spiky = measurement(0.0, 0.0, inputs=(timing("dense", 139.69), timing("sparse", 0.22)))
+    rows = analyze.rows((attempt(1, measurement(0.5, 2.0)), attempt(2, spiky)))
+    assert rows[1].speedup is not None and rows[1].speedup > rows[0].speedup  # type: ignore[operator]
+    assert rows[1].regressions == ("sparse",)
+    assert [r.record for r in rows] == [True, False]
 
 
 def test_the_label_is_cut_at_a_word_and_never_mid_word() -> None:
@@ -139,7 +162,15 @@ def test_the_label_is_the_first_sentence_only() -> None:
 
 def test_the_table_carries_the_baseline_row_and_marks_records() -> None:
     rows = analyze.rows((attempt(1, measurement(0.07, 19.5)),))
-    text = analyze.render_table(rows, 1.3682)
-    assert "0     1.3682    baseline" in text
-    assert "1     0.0700     19.500x *" in text
+    text = analyze.render_table(rows, [ONLY])
+    assert "0    baseline" in text and "1.000x" in text
+    assert "19.500x" in text and text.rstrip().endswith("were slower on at least one input")
     assert "1 attempts, 1 marked * set a new best" in text
+
+
+def test_the_table_has_a_column_per_input_and_counts_the_slower_ones() -> None:
+    spiky = measurement(0.0, 0.0, inputs=(timing("dense", 139.69), timing("sparse", 0.22)))
+    text = analyze.render_table(analyze.rows((attempt(1, spiky),)), ["dense", "sparse"])
+    assert "dense" in text and "sparse" in text
+    assert "139.690x" in text and "0.220x" in text
+    assert "1 were slower on at least one input" in text

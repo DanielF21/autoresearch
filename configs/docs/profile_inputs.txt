@@ -1,0 +1,24 @@
+Cost of nx.clustering(G) on each of the five inputs it is timed on,
+at networkx c94928ed9489, the base commit for every attempt.
+
+Absolute times are from one machine and will differ in your box. What
+carries over is the ratio between the inputs: the same call spans three
+orders of magnitude across them, because the stock implementation's cost
+scales with degree. A change with a fixed setup cost of a few milliseconds
+is free on the first input and is the entire runtime of the fourth.
+
+input           nodes    edges  avg deg       call   hot self  hot share
+er1000_005       1000    49754     49.8    0.8749s    0.9346s     93.8%
+er1000_001       1000     9956     10.0    0.0487s    0.0586s     94.2%
+er1000_0002      1000     1993      2.0    0.0051s    0.0067s     89.3%
+gn800             800      799      1.0    0.0020s    0.0027s     87.5%
+er1600_002       1600    51274     32.0    0.5707s    0.6074s     95.5%
+
+geometric mean of the hot function's share: 92.0%
+
+The hot function dominates at every input, so the same code is worth
+optimising throughout. It is the cost of the work around it that changes:
+448x between the first input and the fourth.
+
+The flat and caller profiles in the other two documents are of the first
+input only, which is the one slow enough for a profile to resolve.

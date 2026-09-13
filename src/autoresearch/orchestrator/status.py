@@ -1,9 +1,15 @@
 """The totals read at the round 20 gate, computed from the run directory alone.
 
 Counts are of facts, not decisions: how many attempts were measured, how many
-passed the tests, how many cleared the noise floor. Best so far is the highest
-speedup among attempts that cleared it; the best raw ratio over every timed
-attempt is shown beside it so the two cannot be confused.
+passed the tests, how many cleared the noise floor, how many were slower on at
+least one input. Best so far is the highest speedup among attempts that cleared
+it; the best raw ratio over every timed attempt is shown beside it so the two
+cannot be confused.
+
+Every speedup here is the geometric mean over the target's inputs, the same
+number the referee records. ``regressed`` counts the attempts that lost their
+real speedup label by being slower somewhere, which is the count worth watching:
+it says whether the agents are still trading one input for another.
 
 The one number here that is not a fact is the dollar cost, which depends on a
 cached input rate Sail does not publish. It is reported as a bracket for that
@@ -31,6 +37,7 @@ class RunStatus:
     duplicates: int
     tests_pass: int
     clears_noise: int
+    regressed: int
     by_stop: dict[str, int]
     best_ratio: float | None
     best_attempt: int | None
@@ -50,7 +57,8 @@ class RunStatus:
             f"run {self.run_id}: {self.rounds_done} of {self.rounds_total} rounds, "
             f"{self.attempts} attempts",
             f"measured {self.measured}, no patch {self.no_patch}, duplicates {self.duplicates}, "
-            f"tests pass {self.tests_pass}, real speedups {self.clears_noise}",
+            f"tests pass {self.tests_pass}, real speedups {self.clears_noise}, "
+            f"slower on some input {self.regressed}",
         ]
         if self.best_ratio is not None:
             lines.append(
@@ -135,6 +143,7 @@ def compute_status(
         duplicates=sum(1 for a in attempts if a.duplicate_of),
         tests_pass=sum(1 for a in measured if a.measurement and a.measurement.tests_pass),
         clears_noise=sum(1 for a in measured if a.clears_noise),
+        regressed=sum(1 for a in measured if a.measurement and a.measurement.regressions),
         by_stop=dict(Counter(str(a.stop_reason) for a in attempts)),
         best_ratio=best,
         best_attempt=which,

@@ -23,7 +23,11 @@ python -m pytest networkx -q -n 4 -p no:cacheprovider
 
 9028 passed, 61 skipped, 741 expected failures. **61s and 101s** on two runs across 4 cores. The referee pays this on every candidate.
 
-## One benchmark, without ASV
+## The benchmark, without ASV
+
+> Update 2026-09-12: the referee now times five inputs, not one, and grades on their
+> geometric mean. The reasoning below still describes how the first of those was chosen.
+> See `artifacts/generality.md`.
 
 Do not import `benchmarks/benchmarks/benchmark_algorithms.py` per timing. It builds every graph in the suite at import time and takes **29 seconds** to load. Build only the target graph with the suite's own constructor and seed:
 
@@ -45,6 +49,10 @@ Implemented in `inbox/null_worker.py`. The benchmark classes use ASV conventions
 | Erdos Renyi (1000, 0.01) | 89ms | 0.0ms | Short anchor |
 
 Chosen because the body is in the 50ms to 2s band, setup is zero, the graph is seeded so every run measures the same input, and the same function is benchmarked at 17 graph shapes, which gives a regression guard set for free.
+
+> Update 2026-09-12: that guard set was never used, and the cost of not using it is
+> measured in `artifacts/generality.md`. The referee now times five shapes spanning the
+> density range, and a patch slower on any of them cannot count as a speedup.
 
 ## Benchmark inventory
 

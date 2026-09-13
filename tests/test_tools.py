@@ -11,7 +11,7 @@ from autoresearch.worker.tools import (
     execute,
 )
 
-TARGET = load_config(Path(__file__).parent.parent / "configs" / "t1_w1.toml").target
+TARGET = load_config(Path(__file__).parent.parent / "configs" / "t1_w4d.toml").target
 
 
 def ctx(box: FakeBox) -> ToolContext:
@@ -59,13 +59,14 @@ def test_run_tests_runs_the_module_suite_and_takes_no_arguments() -> None:
     box = FakeBox().on("run_tests.py", handler)  # type: ignore[arg-type]
     r = execute(ctx(box), "run_tests", {})
     assert r.text.startswith("module tests: PASSED: 5 passed")
-    assert "--target " + TARGET.test_file in seen[-1] and "--workers 1" in seen[-1]
+    assert "--target " + TARGET.tests.module in seen[-1] and "--workers 1" in seen[-1]
     assert "--scope module" in seen[-1]
+    assert "--package-root " + TARGET.package_root in seen[-1]
 
-    # The whole package is never the target, whatever the model passes.
+    # The whole suite is never the target, whatever the model passes.
     execute(ctx(box), "run_tests", {"scope": "full"})
-    assert "--target networkx " not in seen[-1] and "--workers 4" not in seen[-1]
-    assert "--target " + TARGET.test_file in seen[-1]
+    assert f"--target {TARGET.tests.full} " not in seen[-1] and "--workers 4" not in seen[-1]
+    assert "--target " + TARGET.tests.module in seen[-1]
 
     failing["ok"] = True
     r = execute(ctx(box), "run_tests", {})
@@ -78,7 +79,7 @@ def test_run_tests_offers_the_model_no_parameters() -> None:
     assert "referee" in spec["function"]["description"]
 
 
-def test_run_benchmark_alternates_order_and_reports_ratio() -> None:
+def test_run_benchmark_times_every_input_and_alternates_order() -> None:
     roots: list[str] = []
 
     def handler(cmd: str) -> object:
@@ -88,8 +89,50 @@ def test_run_benchmark_alternates_order_and_reports_ratio() -> None:
 
     box = FakeBox().on("time_target.py", handler)  # type: ignore[arg-type]
     r = execute(ctx(box), "run_benchmark", {})
-    assert r.text.startswith("indicative speedup 1.250x")
-    assert roots == [BASE_DIR, REPO_DIR, REPO_DIR, BASE_DIR]
+    n = len(TARGET.inputs)
+    assert roots == [BASE_DIR, REPO_DIR, REPO_DIR, BASE_DIR] * n
+    for spec in TARGET.inputs:
+        assert f"{spec.name}" in r.text
+    assert "1.250x" in r.text and "geometric mean 1.250x" in r.text
+    assert "worst 1.250x" in r.text
+    # The same flags the referee sends, pinned to the same core, so the worker
+    # times what the referee will time.
+    for c in box.commands:
+        assert c.startswith("cd /workspace/guest && taskset -c 2 python3 time_target.py")
+        assert f"--package {TARGET.package}" in c and f"--alias {TARGET.alias}" in c
+        assert "--setup " in c and "--graph" not in c
+
+
+def test_run_benchmark_flags_an_input_the_patch_made_slower() -> None:
+    """The signal the agent had no way to see before. artifacts/generality.md."""
+    slow = TARGET.inputs[-1].setup
+
+    def handler(cmd: str) -> object:
+        base = BASE_DIR in cmd
+        if slow in cmd:  # half speed on this one input, twice as fast elsewhere
+            return ok(json.dumps({"min_all": 1.0 if base else 2.0}))
+        return ok(json.dumps({"min_all": 1.0 if base else 0.5}))
+
+    box = FakeBox().on("time_target.py", handler)  # type: ignore[arg-type]
+    text = execute(ctx(box), "run_benchmark", {}).text
+    assert "<-- SLOWER" in text
+    assert f"{TARGET.inputs[-1].name}" in text
+    assert "worst 0.500x" in text
+    assert "slower" in text and "disqualifies" in text
+
+
+def test_run_benchmark_reports_an_input_that_errored_and_still_times_the_rest() -> None:
+    broken = TARGET.inputs[0].setup
+
+    def handler(cmd: str) -> object:
+        if broken in cmd:
+            return ok(json.dumps({"error": "RecursionError"}))
+        return ok(json.dumps({"min_all": 1.0 if BASE_DIR in cmd else 0.8}))
+
+    box = FakeBox().on("time_target.py", handler)  # type: ignore[arg-type]
+    text = execute(ctx(box), "run_benchmark", {}).text
+    assert "RecursionError" in text
+    assert "geometric mean 1.250x" in text  # the other four still reported
 
 
 def test_shell_runs_in_repo_and_appends_exit_code() -> None:

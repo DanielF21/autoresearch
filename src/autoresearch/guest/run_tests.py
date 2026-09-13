@@ -1,7 +1,9 @@
 """Run pytest on one tree and print one JSON summary. The full log goes to ``--log``.
 
-The tree is put first on ``PYTHONPATH`` so the tests import the code under test
-and not some other copy. Exit code 0 means every selected test passed.
+The package directory, ``root / package_root``, is put first on ``PYTHONPATH``
+so the tests import the code under test and not some other copy. pytest runs
+from ``root`` so the target path is repo relative whatever the layout. Exit
+code 0 means every selected test passed.
 """
 
 from __future__ import annotations
@@ -39,6 +41,9 @@ def parse_summary(text: str) -> dict[str, int]:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", required=True)
+    ap.add_argument(
+        "--package-root", default=".", help="directory under root the package imports from"
+    )
     ap.add_argument("--target", required=True, help="path relative to root: a file or a package")
     ap.add_argument("--scope", required=True, help="label recorded in the summary")
     ap.add_argument("--workers", type=int, default=4)
@@ -59,7 +64,7 @@ def main() -> int:
     ]
     if args.workers > 1:
         argv += ["-n", str(args.workers)]
-    env = dict(os.environ, PYTHONPATH=str(root))
+    env = dict(os.environ, PYTHONPATH=str((root / args.package_root).resolve()))
     t0 = time.perf_counter()
     try:
         proc = subprocess.run(

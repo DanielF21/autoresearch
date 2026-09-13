@@ -199,7 +199,7 @@ Both moved in the same direction, which mildly supports a warmup reading, but **
 
 ## Block C: mergeability calibration
 
-**Dropped for now** (user decision, 2026-09-11). The finding from PR #7971 stands on record: networkx maintainers require performance reported across multiple graph shapes including regressions, while the referee as designed accepts on one shape. Revisit before opening any pull request.
+**Dropped for now** (user decision, 2026-09-11). The finding from PR #7971 stands on record: **Done 2026-09-12: the referee now times five shapes and refuses a patch slower on any of them. See `artifacts/generality.md`.** networkx maintainers require performance reported across multiple graph shapes including regressions, while the referee as designed accepts on one shape. Revisit before opening any pull request.
 
 ## C. Real noise floor via null patch
 

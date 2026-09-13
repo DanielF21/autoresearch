@@ -11,6 +11,7 @@ cannot be trusted.
 
 from __future__ import annotations
 
+import datetime as dt
 import os
 import subprocess
 from pathlib import Path
@@ -27,6 +28,18 @@ RUN_GITIGNORE = "LOCK\n"
 
 class RunError(RuntimeError):
     pass
+
+
+def _now() -> str:
+    return dt.datetime.now().strftime("%H:%M:%S")
+
+
+def _log(log: Path | None, line: str) -> None:
+    """One line to the run log, flushed. Nothing else reports progress live."""
+    if log is None:
+        return
+    with log.open("a") as fh:
+        fh.write(line + "\n")
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -102,19 +115,26 @@ def run(
         pool.start()
         last = start - 1
         for round_no in range(start, stop + 1):
+            # A start line, not only a finish line. The log used to gain nothing
+            # until a round completed, so a round that never completed was
+            # indistinguishable from one that had not started, and a stalled run
+            # looked exactly like a slow one. Timestamped, so how long a round
+            # has been going is readable without attaching to the process.
+            _log(log, f"round {round_no}: workers started at {_now()}")
             outcome = run_round(round_no, config, paths, worker, pool)
             last = round_no
             commit_run(paths, f"round {round_no}")
-            if log is not None:
-                with log.open("a") as fh:
-                    r = outcome.record
-                    best = "none" if r.best_ratio_so_far is None else f"{r.best_ratio_so_far:.4f}"
-                    fh.write(
-                        f"round {r.round}: attempts {list(r.attempt_numbers)} measured "
-                        f"{list(r.measured_numbers)} real speedups {list(r.clears_noise_numbers)} "
-                        f"best so far {best} worker {r.worker_wall_s:.0f}s referee "
-                        f"{r.referee_wall_s:.0f}s errors {len(r.errors)}\n"
-                    )
+            r = outcome.record
+            best = "none" if r.best_ratio_so_far is None else f"{r.best_ratio_so_far:.4f}"
+            slower = sorted(n for n, m in outcome.measurements.items() if m.regressions)
+            _log(
+                log,
+                f"round {r.round}: attempts {list(r.attempt_numbers)} measured "
+                f"{list(r.measured_numbers)} real speedups {list(r.clears_noise_numbers)} "
+                f"slower somewhere {slower} "
+                f"best so far {best} worker {r.worker_wall_s:.0f}s referee "
+                f"{r.referee_wall_s:.0f}s errors {len(r.errors)} done at {_now()}",
+            )
         if last >= config.rounds:
             pool.terminate_all()
             commit_run(paths, "run complete")

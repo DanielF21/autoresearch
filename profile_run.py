@@ -2,7 +2,7 @@
 """Where the time went, for every part of a run.
 
     uv run profile_run.py runs/t1_w4
-    uv run profile_run.py runs/t1_w4 --out artifacts/t1_w4_time.png --csv time.csv
+    uv run profile_run.py runs/t1_w4 --out report_materials/t1_w4_time.png --csv time.csv
 
 Three levels, printed as tables and drawn as one figure:
 
@@ -17,19 +17,29 @@ The referee records only its total ``wall_s`` plus test durations and the
 timings themselves, so its breakdown cannot all be read off. What each number
 is:
 
-  measured   module tests, full suite, and the per launch benchmark times.
+  measured   module tests, full suite, the per launch benchmark times, and the
+             fixed cost of each timing launch where the record carries it.
   modelled   a timing launch costs one fixed startup plus ``repeats_per_launch``
-             bodies. Fixed is 0.3 s, measurement D, long bench, plain config.
-             The same shape covers the two verify launches and the canary.
+             bodies. For records without a fixed cost, and for the canary,
+             fixed is 0.3 s: measurement D on networkx, long bench, plain
+             config. The same shape covers the two verify launches.
   derived    worktree setup, cleanup and guest overhead is whatever is left.
 
 The derived block is named "setup and cleanup" and is a residual, not a claim
 about any one step. Everything labelled measured is read straight from the run
 directory.
 
-A run recorded before instruction counting was retired carries that cost inside
-the referee wall clock, so its residual is large and its error list says why.
-See artifacts/instruction_counting.md.
+The referee times every one of the target's inputs, so the launch count and the
+two timing bands are sums over inputs. An input whose timing pass was retried
+paid for a first pass that is not in the record, so its seconds land in the
+residual; the row is flagged "retimed" with the input named, which is what
+attempt 0009 of t1_w4b needed and did not have.
+
+Two shapes of older run still read. One from before instruction counting was
+retired carries that cost inside the referee wall clock, so its residual is
+large and its error list says why (artifacts/instruction_counting.md). One from
+before the referee timed more than one input profiles as a single input named
+"benchmark" (artifacts/generality.md).
 """
 
 from __future__ import annotations
@@ -38,18 +48,29 @@ import argparse
 import csv
 import json
 import sys
+import tomllib
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from autoresearch import history
-from autoresearch.config import RunConfig, load_config
 from autoresearch.types import Attempt, Measurement
 
-# One process launch pays this before the first call of the target: interpreter
-# start, importing networkx from the tree, building the graph. Measurement D,
-# long bench, plain config: per candidate 1.7 s of which fixed is 0.3 s.
-LAUNCH_FIXED_S = 0.3
+# One process launch pays a fixed cost before the first call of the target:
+# interpreter start, the import, the input's setup. Records written since the
+# guest began reporting its own process age carry it per launch, as
+# ``PairTiming.base_fixed_s`` and ``patched_fixed_s``. Records from before
+# that, and the canary, which has no such field, are modelled with the one
+# value ever measured for it: the networkx target, measurement D, long bench,
+# plain config, per candidate 1.7 s of which fixed was 0.3 s. It is a networkx
+# number and is applied to another target's old records only for want of a
+# better one.
+LEGACY_LAUNCH_FIXED_S = 0.3
+
+
+def _fixed(recorded: float | None) -> float:
+    return LEGACY_LAUNCH_FIXED_S if recorded is None else recorded
+
 
 WORKER_ORDER = ["box create", "box prepare", "model", "tools", "harness"]
 REFEREE_ORDER = [
@@ -99,6 +120,10 @@ class RefereeProfile:
     parts: dict[str, float] = field(default_factory=dict)
     launches: int = 0
     errors: int = 0
+    # Inputs whose timing pass ran twice. The discarded pass is not in the
+    # record, so its seconds show up in "setup and cleanup" and this is the only
+    # thing that says why that block is large for one attempt and not another.
+    retried: tuple[str, ...] = ()
 
 
 def worker_profile(attempt: Attempt, transcript: str) -> WorkerProfile:
@@ -155,18 +180,37 @@ def worker_profile(attempt: Attempt, transcript: str) -> WorkerProfile:
     return p
 
 
-def referee_profile(number: int, m: Measurement, config: RunConfig) -> RefereeProfile:
-    """Measured where the record has it, modelled for launches, derived for the rest."""
-    repeats = config.referee.repeats_per_launch
+def referee_profile(number: int, m: Measurement, config: RunFacts) -> RefereeProfile:
+    """Measured where the record has it, modelled for launches, derived for the rest.
+
+    Every one of the target's inputs is timed with its own pairs, so the launch
+    count and the two timing bands are sums over inputs rather than over one
+    flat pair list. A retried input paid for its first pass too, and that pass
+    is not in the record, so its launches are counted from ``retried`` and its
+    seconds land in the residual.
+    """
+    repeats = config.repeats_per_launch
     p = RefereeProfile(number=number, wall_s=m.wall_s)
     tests = {t.scope: t.duration_s for t in m.tests}
 
-    base_timing = sum(LAUNCH_FIXED_S + repeats * x.base_s for x in m.pairs)
-    patched_timing = sum(LAUNCH_FIXED_S + repeats * x.patched_s for x in m.pairs)
-    # Two verify launches, one call each under cProfile, one per tree.
-    one = m.pairs[0] if m.pairs else None
-    verify = 2 * LAUNCH_FIXED_S + ((one.base_s + one.patched_s) if one else 0.0)
-    canary = LAUNCH_FIXED_S + 5 * (m.canary_s or 0.0)
+    base_timing = 0.0
+    patched_timing = 0.0
+    verify = 0.0
+    launches = 0
+    for t in m.inputs:
+        base_timing += sum(_fixed(x.base_fixed_s) + repeats * x.base_s for x in t.pairs)
+        patched_timing += sum(_fixed(x.patched_fixed_s) + repeats * x.patched_s for x in t.pairs)
+        # Two verify launches per input, one call each under cProfile, one per
+        # tree. Their own fixed cost is not recorded; the first pair's is the
+        # nearest measurement of it.
+        one = t.pairs[0] if t.pairs else None
+        if one is not None:
+            verify += _fixed(one.base_fixed_s) + _fixed(one.patched_fixed_s)
+            verify += one.base_s + one.patched_s
+        else:
+            verify += 2 * LEGACY_LAUNCH_FIXED_S
+        launches += 2 * len(t.pairs) * (2 if t.retried else 1) + 2
+    canary = LEGACY_LAUNCH_FIXED_S + 5 * (m.canary_s or 0.0)
 
     p.parts["module tests"] = tests.get("module", 0.0)
     p.parts["full suite"] = tests.get("full", 0.0)
@@ -175,8 +219,9 @@ def referee_profile(number: int, m: Measurement, config: RunConfig) -> RefereePr
     p.parts["timing base"] = base_timing
     p.parts["timing patched"] = patched_timing
     p.parts["setup and cleanup"] = max(0.0, m.wall_s - sum(p.parts.values()))
-    p.launches = 2 * len(m.pairs) + 2 + 1  # timing, verify, canary
-    p.errors = len(m.errors)
+    p.launches = launches + 1  # the canary
+    p.errors = len(m.errors) + sum(len(t.errors) for t in m.inputs)
+    p.retried = tuple(t.name for t in m.inputs if t.retried)
     return p
 
 
@@ -202,11 +247,35 @@ class RoundProfile:
         return sum(self.referee_wall_s - r for r in self.referee_each)
 
 
+@dataclass(frozen=True)
+class RunFacts:
+    """The two config numbers this profile needs, read without validating the rest.
+
+    Deliberately not ``load_config``. That parser's job is to say whether a
+    config describes a runnable experiment, and it correctly refuses a config
+    written before the referee timed more than one input, which is what keeps an
+    old run from silently resuming into a different harness. A profile is only
+    reading a historical record, so it asks for the two fields it uses and
+    ignores whether the rest would still run.
+    """
+
+    width: int
+    repeats_per_launch: int
+
+
+def read_run_facts(config_path: Path) -> RunFacts:
+    raw = tomllib.loads(config_path.read_text())
+    return RunFacts(
+        width=int(raw.get("run", {}).get("width", 1)),
+        repeats_per_launch=int(raw.get("referee", {}).get("repeats_per_launch", 7)),
+    )
+
+
 def build(
     run: Path,
-) -> tuple[RunConfig, list[WorkerProfile], list[RefereeProfile], list[RoundProfile]]:
+) -> tuple[RunFacts, list[WorkerProfile], list[RefereeProfile], list[RoundProfile]]:
     paths = history.RunPaths(run)
-    config = load_config(paths.config)
+    config = read_run_facts(paths.config)
     attempts = history.load_history(paths)
     rounds = history.read_rounds(paths)
 
@@ -244,7 +313,7 @@ def _bar(value: float, total: float, width: int = 24) -> str:
 
 
 def render(
-    config: RunConfig,
+    config: RunFacts,
     workers: list[WorkerProfile],
     referees: list[RefereeProfile],
     rounds: list[RoundProfile],
@@ -299,6 +368,8 @@ def render(
     for ref in referees:
         cells = " ".join(f"{ref.parts.get(k, 0.0):>13.1f}" for k in REFEREE_ORDER)
         flag = f"  {ref.errors} error(s)" if ref.errors else ""
+        if ref.retried:
+            flag += f"  retimed {', '.join(ref.retried)}"
         out.append(f"{ref.number:>4} {ref.wall_s:>7.0f} {cells}{flag}")
     rtot = {k: sum(ref.parts.get(k, 0.0) for ref in referees) for k in REFEREE_ORDER}
     out.append(
@@ -331,7 +402,7 @@ def write_csv(path: Path, workers: list[WorkerProfile], referees: list[RefereePr
 
 
 def plot(
-    config: RunConfig,
+    config: RunFacts,
     workers: list[WorkerProfile],
     referees: list[RefereeProfile],
     rounds: list[RoundProfile],

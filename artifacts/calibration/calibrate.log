@@ -1,0 +1,53 @@
+calibrating 5 inputs at 42 pairs each (7 rounds of 6), floor at 1 in 100: er1000_005, er1000_001, er1000_0002, gn800, er1600_002
+referee box calibrate-20260912-161509 (sb_22acedc9-cd98-49f0-a62e-6de8de2a9b03)
+  er1000_005: 6/42 pairs
+  er1000_001: 6/42 pairs
+  er1000_0002: 6/42 pairs
+  gn800: 6/42 pairs
+  er1600_002: 6/42 pairs
+  er1000_005: 12/42 pairs
+  er1000_001: 12/42 pairs
+  er1000_0002: 12/42 pairs
+  gn800: 12/42 pairs
+  er1600_002: 12/42 pairs
+  er1000_005: 18/42 pairs
+  er1000_001: 18/42 pairs
+  er1000_0002: 18/42 pairs
+  gn800: 18/42 pairs
+  er1600_002: 18/42 pairs
+  er1000_005: 24/42 pairs
+  er1000_001: 24/42 pairs
+  er1000_0002: 24/42 pairs
+  gn800: 24/42 pairs
+  er1600_002: 24/42 pairs
+  er1000_005: 30/42 pairs
+  er1000_001: 30/42 pairs
+  er1000_0002: 30/42 pairs
+  gn800: 30/42 pairs
+  er1600_002: 30/42 pairs
+  er1000_005: 36/42 pairs
+  er1000_001: 36/42 pairs
+  er1000_0002: 36/42 pairs
+  gn800: 36/42 pairs
+  er1600_002: 36/42 pairs
+  er1000_005: 42/42 pairs
+  er1000_001: 42/42 pairs
+  er1000_0002: 42/42 pairs
+  gn800: 42/42 pairs
+  er1600_002: 42/42 pairs
+box terminated
+
+er1000_005      floor 1.0082   from 42 clean of 42 pairs, median 1.0015, range 0.9820 to 1.0263
+er1000_001      floor 1.0151   from 42 clean of 42 pairs, median 1.0035, range 0.9838 to 1.0376
+er1000_0002     floor 1.0280   from 42 clean of 42 pairs, median 1.0059, range 0.9470 to 1.0461
+gn800           floor 1.0218   from 42 clean of 42 pairs, median 1.0027, range 0.9117 to 1.0438
+er1600_002      floor 1.0193   from 40 clean of 42 pairs, median 1.0027, range 0.7332 to 1.2003
+
+record: artifacts/calibration/20260912-161509.jsonl
+
+paste into the config:
+noise_floor = 1.0082   # calibrated 20260912-161509, 42 null pairs
+noise_floor = 1.0151   # calibrated 20260912-161509, 42 null pairs
+noise_floor = 1.0280   # calibrated 20260912-161509, 42 null pairs
+noise_floor = 1.0218   # calibrated 20260912-161509, 42 null pairs
+noise_floor = 1.0193   # calibrated 20260912-161509, 40 null pairs

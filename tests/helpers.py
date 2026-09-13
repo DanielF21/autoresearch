@@ -41,20 +41,24 @@ def referee_box(
     box: FakeBox | None = None,
     *,
     speedup: float | Callable[[str], float] = 1.05,
+    per_input: dict[str, float] | None = None,
     head: str = BASE_SHA,
     apply_ok: bool = True,
     module_ok: bool = True,
     full_ok: bool = True,
     fp_match: bool = True,
     patched_verify_fails: bool = False,
+    verify_fails_for: tuple[str, ...] = (),
     contaminate_pairs: bool = False,
     cleanup_ok: bool = True,
 ) -> FakeBox:
     """A referee box whose patched tree runs ``speedup`` times faster than the base.
 
     ``speedup`` may be a function of the patch text written to the box, so one
-    box can answer differently per attempt. ``head`` is what the box reports
-    after checking out the base; the referee refuses anything but the base sha.
+    box can answer differently per attempt. ``per_input`` overrides it for named
+    inputs, which is how a patch that trades one input for another is faked.
+    ``head`` is what the box reports after checking out the base; the referee
+    refuses anything but the base sha.
     """
     box = box if box is not None else FakeBox()
 
@@ -104,17 +108,50 @@ def referee_box(
         root = arg(cmd, "--root")
         patched = root == PATCHED_TREE
         if "--verify" in cmd:
-            if patched and patched_verify_fails:
+            # A verify launch carries no label, so an input is identified here
+            # by its setup statements, which are the only thing that names it.
+            setup = arg(cmd, "--setup")
+            fails = patched_verify_fails or setup in verify_fails_for
+            if patched and fails:
                 return ok(json.dumps({"error": "RecursionError in patched tree"}))
             fp = "fp_same" if (fp_match or not patched) else "fp_other"
-            return ok(json.dumps({"kind": "verify", "hot_executed": True, "result_fp": fp}))
-        t = 1.0 / current_speedup() if patched else 1.0
+            return ok(
+                json.dumps(
+                    {
+                        "kind": "verify",
+                        "hot_executed": True,
+                        "hot_tottime_share": 0.9,
+                        "call_s": 0.5,
+                        "fixed_s": 0.3,
+                        "python": [3, 12, 4],
+                        "result_fp": fp,
+                    }
+                )
+            )
+        # The referee labels a timing launch "<input name>/<tree>", which is the
+        # only thing in the command that says which input is being timed.
+        name = arg(cmd, "--label").split("/")[0]
+        ratio = (per_input or {}).get(name, current_speedup())
+        t = 1.0 / ratio if patched else 1.0
+        fixed = 0.31 if patched else 0.29
         if contaminate_pairs:
             samples = [{"t": t, "contaminated": True, "reasons": ["steal"]}]
             return ok(
-                json.dumps({"kind": "run", "min_clean": None, "min_all": t, "samples": samples})
+                json.dumps(
+                    {
+                        "kind": "run",
+                        "min_clean": None,
+                        "min_all": t,
+                        "samples": samples,
+                        "fixed_s": fixed,
+                    }
+                )
             )
-        return ok(json.dumps({"kind": "run", "min_clean": t, "min_all": t, "samples": []}))
+        return ok(
+            json.dumps(
+                {"kind": "run", "min_clean": t, "min_all": t, "samples": [], "fixed_s": fixed}
+            )
+        )
 
     box.on("time_target.py", time_target)
     box.on("canary.py", ok(json.dumps({"kind": "canary", "min_s": 0.5})))

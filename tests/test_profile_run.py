@@ -1,15 +1,16 @@
 """The time profiler: how a transcript is split, and what the referee model claims."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import profile_run
+import pytest
 
-from autoresearch.config import load_config
 from autoresearch.types import (
     Attempt,
     AttemptRef,
-    Measurement,
+    InputTiming,
     PairTiming,
     Prediction,
     StopReason,
@@ -17,7 +18,7 @@ from autoresearch.types import (
     Usage,
 )
 from tests.helpers import BASE_SHA
-from tests.test_analyze import measurement, pair
+from tests.test_analyze import measurement, pair, timing
 
 ROOT = Path(__file__).parent.parent
 
@@ -96,32 +97,89 @@ def test_the_slowest_model_call_and_tool_are_kept() -> None:
     assert p.slowest_tool == ("run_tests", 86.0)
 
 
+FACTS = profile_run.RunFacts(width=4, repeats_per_launch=7)
+
+
 def test_the_referee_model_charges_one_startup_per_launch() -> None:
-    cfg = load_config(ROOT / "configs" / "t1_w4.toml")
     m = measurement(0.1, 10.0, pairs=tuple(pair(i, 1.0, 0.1) for i in range(6)))
-    p = profile_run.referee_profile(1, m, cfg)
+    p = profile_run.referee_profile(1, m, FACTS)
 
     # 6 launches per tree, each one fixed startup plus repeats_per_launch bodies.
-    repeats = cfg.referee.repeats_per_launch
-    assert p.parts["timing base"] == 6 * (profile_run.LAUNCH_FIXED_S + repeats * 1.0)
-    assert p.parts["timing patched"] == 6 * (profile_run.LAUNCH_FIXED_S + repeats * 0.1)
+    repeats = FACTS.repeats_per_launch
+    assert p.parts["timing base"] == 6 * (profile_run.LEGACY_LAUNCH_FIXED_S + repeats * 1.0)
+    assert p.parts["timing patched"] == 6 * (profile_run.LEGACY_LAUNCH_FIXED_S + repeats * 0.1)
+    assert p.launches == 2 * 6 + 2 + 1  # timing, two verify, one canary
+
+
+def test_a_recorded_fixed_cost_replaces_the_modelled_one() -> None:
+    """Since the guest reports its process age, the launch overhead is measured
+    per launch and the networkx constant is only for records that predate it."""
+    pairs = tuple(
+        replace(pair(i, 1.0, 0.1), base_fixed_s=0.5, patched_fixed_s=0.7) for i in range(6)
+    )
+    m = measurement(0.1, 10.0, pairs=pairs)
+    p = profile_run.referee_profile(1, m, FACTS)
+    repeats = FACTS.repeats_per_launch
+    assert p.parts["timing base"] == pytest.approx(6 * (0.5 + repeats * 1.0))
+    assert p.parts["timing patched"] == pytest.approx(6 * (0.7 + repeats * 0.1))
+    assert p.parts["verify"] == pytest.approx(0.5 + 0.7 + 1.0 + 0.1)
+    # A mix: one launch recorded, the other not, each attributed its own way.
+    mixed = tuple(replace(x, patched_fixed_s=None) for x in pairs)
+    q = profile_run.referee_profile(1, measurement(0.1, 10.0, pairs=mixed), FACTS)
+    assert q.parts["timing patched"] == pytest.approx(
+        6 * (profile_run.LEGACY_LAUNCH_FIXED_S + repeats * 0.1)
+    )
+
+
+def test_the_launch_count_and_the_timing_bands_are_sums_over_inputs() -> None:
+    two = measurement(
+        0.0, 0.0, inputs=(timing("dense", 10.0, patched_s=0.1), timing("sparse", 2.0))
+    )
+    p = profile_run.referee_profile(1, two, FACTS)
+    one = profile_run.referee_profile(1, measurement(0.1, 10.0), FACTS)
+    assert p.launches == 2 * one.launches - 1  # the canary is charged once
+    assert p.parts["timing base"] == pytest.approx(2 * one.parts["timing base"])
+
+
+def test_a_retried_input_is_named_and_its_launches_are_counted_twice() -> None:
+    """The discarded first pass is not in the record. Attempt 0009 of t1_w4b was
+    exactly this, and showed up only as 73.7s of unexplained residual."""
+    retimed = replace(timing("dense", 10.0, patched_s=0.1), retried=True)
+    m = measurement(0.0, 0.0, inputs=(retimed,))
+    p = profile_run.referee_profile(1, m, FACTS)
+    assert p.retried == ("dense",)
+    assert p.launches == 2 * 2 * 6 + 2 + 1
+    assert profile_run.referee_profile(1, measurement(0.1, 10.0), FACTS).retried == ()
 
 
 def test_everything_the_referee_record_does_not_explain_lands_in_one_named_block() -> None:
-    cfg = load_config(ROOT / "configs" / "t1_w4.toml")
     m = measurement(0.1, 10.0, pairs=tuple(pair(i, 1.0, 0.1) for i in range(6)))
-    m = Measurement(**{**m.__dict__, "wall_s": 5000.0})
-    p = profile_run.referee_profile(1, m, cfg)
+    m = replace(m, wall_s=5000.0)
+    p = profile_run.referee_profile(1, m, FACTS)
     assert sum(p.parts.values()) == 5000.0
     assert p.parts["setup and cleanup"] > 4000
 
 
 def test_a_referee_that_recorded_an_error_is_flagged() -> None:
-    cfg = load_config(ROOT / "configs" / "t1_w4.toml")
     clean = measurement(0.1, 10.0)
-    assert profile_run.referee_profile(1, clean, cfg).errors == 0
-    broke = Measurement(**{**clean.__dict__, "errors": ("timing: guest died", "cleanup")})
-    assert profile_run.referee_profile(1, broke, cfg).errors == 2
+    assert profile_run.referee_profile(1, clean, FACTS).errors == 0
+    broke = replace(clean, errors=("timing: guest died", "cleanup"))
+    assert profile_run.referee_profile(1, broke, FACTS).errors == 2
+    # An error recorded against one input counts too.
+    per_input = measurement(0.0, 0.0, inputs=(replace(timing("d", 2.0), errors=("x",)),))
+    assert profile_run.referee_profile(1, per_input, FACTS).errors == 1
+
+
+def test_run_facts_reads_a_config_the_strict_parser_would_refuse(tmp_path: Path) -> None:
+    """An old run's frozen config cannot load, and must still profile."""
+    old = tmp_path / "config.toml"
+    old.write_text(
+        '[run]\nrun_id = "x"\nwidth = 4\nrounds = 3\n\n'
+        '[target]\ngraph = "nx.g()"\ncall = "nx.c(G)"\n\n'
+        "[referee]\npairs = 6\nnoise_floor = 1.0106\nrepeats_per_launch = 7\n"
+    )
+    facts = profile_run.read_run_facts(old)
+    assert facts.width == 4 and facts.repeats_per_launch == 7
 
 
 def test_the_barrier_cost_is_the_wait_for_the_slowest() -> None:
@@ -140,4 +198,5 @@ def test_the_barrier_cost_is_the_wait_for_the_slowest() -> None:
 def test_the_suite_result_and_pair_fixtures_still_match_the_types() -> None:
     # Guards the fixtures these tests are built on against a types.py change.
     assert isinstance(measurement(0.1, 2.0).tests[0], SuiteResult)
-    assert isinstance(measurement(0.1, 2.0).pairs[0], PairTiming)
+    assert isinstance(measurement(0.1, 2.0).inputs[0], InputTiming)
+    assert isinstance(measurement(0.1, 2.0).inputs[0].pairs[0], PairTiming)

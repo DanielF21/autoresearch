@@ -8,17 +8,17 @@ last.
 
 from __future__ import annotations
 
-from autoresearch.config import TargetSpec
+from autoresearch.config import BenchmarkInput, TargetSpec
 from autoresearch.types import Attempt
 
-SYSTEM_PROMPT = """\
+_SYSTEM_PROMPT = """\
 You are a performance engineer working alone in a sandbox on one repository.
-Your job is to make one benchmark faster with one patch, without changing what
-the code computes, and to say before measurement how much faster you expect it
-to be.
+Your job is to make one call faster with one patch, across every input it is
+measured on, without changing what the code computes, and to say before
+measurement how much faster you expect it to be.
 
-Your sandbox is a Debian container you are root in, with Python 3.12, git, and
-the usual command line tools. The shell is how you look around and make changes.
+Your sandbox is a Debian container you are root in, with Python {python}, git,
+and the usual command line tools. The shell is how you look around and make changes.
 There is no file reading or editing tool; use the shell for both. The filesystem:
 
   /workspace/repo      the repository, checked out at the original commit. This
@@ -38,11 +38,14 @@ How this works:
   patch; every earlier patch is on disk under /workspace/history/NNNN/patch.diff
   and can be applied with git apply.
 - The referee measures every submission in full and records all of it: the
-  module's tests, the whole suite, whether the benchmark result is unchanged,
-  and six back to back timings against the original. A submission that fails
-  tests or is slower is still recorded, so the next worker learns from it.
-- A real speedup is one that passes both suites, computes the same result, and
-  whose measured speedup reaches the noise floor given below.
+  module's tests, the whole suite, whether the result is unchanged on every
+  input, and back to back timing pairs on every input against the original. How
+  many pairs, and on which inputs, is stated with the target below. A submission
+  that fails tests or is slower is still recorded, so the next worker learns
+  from it.
+- A real speedup passes both suites, computes the same result on every input,
+  is not slower on any input, and clears the noise floor on at least one. The
+  number recorded for it is the geometric mean across the inputs.
 - Only source files may change. A patch that edits tests or benchmarks is
   measured but marked out of scope, and cannot count as a speedup.
 - Every earlier attempt is in your history with its measurements. Read it
@@ -50,6 +53,8 @@ How this works:
   different.
 - Work in small steps: look, change, run the module tests, run the benchmark,
   and submit when you have something. An attempt that never submits is wasted.
+- run_benchmark times every input, so it is what tells you whether a change
+  helps everywhere or only where you were looking. Run it before you submit.
 - run_tests runs the hot module's own tests, which is the check worth making
   while you work. You cannot run the whole suite and do not need to: the referee
   runs it on every submission, and a submission that breaks it is recorded as
@@ -57,6 +62,11 @@ How this works:
 - When you submit, the harness takes git diff of your working tree as the
   patch. Nothing else you write counts.
 """
+
+
+def system_prompt(python: str) -> str:
+    """The system message. ``python`` is the version the box reported, never assumed."""
+    return _SYSTEM_PROMPT.format(python=python)
 
 
 def _plural(n: int, noun: str) -> str:
@@ -79,6 +89,9 @@ def outcome(a: Attempt) -> str:
         return "tests failed"
     if m.result_matches is False:
         return "wrong result"
+    if m.regressions:
+        # Named, because which input a patch lost on is the whole lesson.
+        return f"slower on {', '.join(m.regressions)}"
     if m.clears_noise:
         return "real speedup"
     return "below the noise floor"
@@ -87,10 +100,11 @@ def outcome(a: Attempt) -> str:
 def index_line(a: Attempt) -> str:
     m = a.measurement
     speed = "--" if m is None or m.speedup is None else f"{m.speedup:.2f}x"
+    worst = "--" if m is None or m.worst_speedup is None else f"{m.worst_speedup:.2f}x"
     note = outcome(a)
     if a.duplicate_of:
         note += f", same diff as {a.duplicate_of}"
-    return f"{a.ref.dirname:<4}  {speed:>8}  {note}"
+    return f"{a.ref.dirname:<4}  {speed:>8}  {worst:>8}  {note}"
 
 
 def render_history(history: tuple[Attempt, ...]) -> str:
@@ -111,27 +125,76 @@ def render_history(history: tuple[Attempt, ...]) -> str:
         + (f", best {best:.2f}x" if best else "")
         + ". Newest last.\n\n"
         "Each is a directory under /workspace/history holding patch.diff, "
-        "measurement.json and rationale.md. Read the ones worth reading before you "
-        "repeat an idea or build on one.\n\n"
+        "measurement.json and rationale.md. The measurement holds every input's own "
+        "timing, which the two columns here only summarise. Read the ones worth reading "
+        "before you repeat an idea or build on one.\n\n"
         "```\n"
-        f"{'id':<4}  {'speedup':>8}  outcome\n"
+        f"{'id':<4}  {'geomean':>8}  {'worst':>8}  outcome\n"
     )
     return head + "\n".join(index_line(a) for a in history) + "\n```\n"
 
 
-def render_target(target: TargetSpec, base_sha: str, noise_floor: float) -> str:
+def _scoring_rule(n: int) -> str:
+    """How the n input ratios become the one number, in that target's arithmetic.
+
+    The worked example is computed rather than written out, because the input
+    count is a property of the config. A target with one input has no mean to
+    take and gets a sentence that says so.
+    """
+    if n == 1:
+        return (
+            "**Your recorded speedup is the ratio on that one input.** There is no mean to "
+            "take.\n\n"
+        )
+    spike = 100.0 ** (1.0 / n)
+    doubled = 2.0 ** (1.0 / n)
+    return (
+        f"**Your recorded speedup is the geometric mean across all {n}.** A patch that is "
+        f"100x on one input and unchanged on the other {n - 1} scores {spike:.2f}x, the same "
+        f"as one that is {spike:.2f}x everywhere. Doubling every input doubles your score; "
+        f"doubling one of {n} multiplies it by {doubled:.3f}. Breadth counts for {n} times "
+        "what depth counts for.\n\n"
+    )
+
+
+def _input_block(i: BenchmarkInput) -> str:
+    floor = "uncalibrated" if i.noise_floor is None else f"floor {i.noise_floor:.4f}"
+    setup = "\n".join(f"    {line}" for line in i.setup.strip().splitlines())
+    return f"{i.name}  ({floor})\n{setup}"
+
+
+def render_target(target: TargetSpec, base_sha: str, pairs: int) -> str:
+    package_at = (
+        f"{target.package_root}/{target.package}" if target.package_root != "." else target.package
+    )
     return (
         "## Target\n\n"
         f"Repository: {target.repo} at commit {base_sha[:12]}, the original for every attempt.\n"
+        f"Package: `{target.package}`, imported from `{package_at}` in the tree, bound to "
+        f"`{target.alias}` below.\n"
         f"Hot file: {target.hot_file}\n"
-        f"Its tests: {target.test_file}\n"
-        f"Benchmark graph: `G = {target.graph}`\n"
+        f"Its tests: {target.tests.module}\n"
         f"Benchmark call: `{target.call}`\n"
-        "Speedup: the original's time divided by your patched time, taken as the median of "
-        "six back to back pairs. 2.00x is twice as fast, 0.50x is half as fast, 1.00x is no "
-        f"change. Below {noise_floor}x it cannot be told apart from a patch that changes "
-        "nothing, so that is the floor a real speedup has to clear.\n"
         f"Allowed files: {', '.join(target.allow)}. Never: {', '.join(target.deny)}.\n"
+        "\n### Inputs\n\n"
+        f"The same call is timed on every one of these, {_plural(pairs, 'back to back pair')} "
+        "each, on every submission. They are not variations to pick between: your patch is "
+        "measured on all of them. Each input is the statements below, run once with "
+        f"`{target.alias}` bound to the package and `ROOT` to the tree, and then the call "
+        "is timed in that namespace.\n\n"
+        "```\n" + "\n\n".join(_input_block(i) for i in target.inputs) + "\n```\n\n"
+        "Speedup on one input is the original's time divided by your patched time, taken as "
+        "the median over that input's pairs. 2.00x is twice as fast, 0.50x is half as fast, "
+        "1.00x is no change. Each input has its own floor above, because a call of a few "
+        "milliseconds is noisier than one of a second; below its floor a change cannot be "
+        "told apart from a patch that does nothing.\n\n"
+        + _scoring_rule(len(target.inputs))
+        + "**A patch that is slower on any input is not a speedup at all**, however fast it "
+        "is elsewhere. Slower means below 1/floor for that input, the mirror of the test "
+        "above. This is the rule a fast path tends to fall foul of: setup cost is paid on "
+        "every call, so a path that pays for itself where the call is expensive can lose "
+        "where the call is cheap, and a guard on the wrong property will not prevent that. "
+        "run_benchmark times every input, so run it before you submit.\n"
     )
 
 
@@ -147,13 +210,13 @@ def render_docs(docs: tuple[tuple[str, str], ...]) -> str:
 def initial_user_message(
     target: TargetSpec,
     base_sha: str,
-    noise_floor: float,
     docs: tuple[tuple[str, str], ...],
     history: tuple[Attempt, ...],
     attempt_number: int,
+    pairs: int,
 ) -> str:
     return (
-        render_target(target, base_sha, noise_floor)
+        render_target(target, base_sha, pairs)
         + "\n"
         + render_docs(docs)
         + "\n"

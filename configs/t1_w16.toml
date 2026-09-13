@@ -12,13 +12,52 @@ repo = "https://github.com/networkx/networkx"
 sha = "c94928ed94899033126c9d47f797a1f698584b20"
 hot_file = "networkx/algorithms/cluster.py"
 test_file = "networkx/algorithms/tests/test_cluster.py"
-graph = "nx.erdos_renyi_graph(1000, 0.05, seed=42, directed=True)"
 call = "nx.clustering(G)"
 allow = ["networkx/**"]
 deny = ["networkx/**/tests/**", "benchmarks/**"]
-# Shown to every worker. The profile only; artifacts/repo.md is left out because
+# Shown to every worker. The profiles only; artifacts/repo.md is left out because
 # it names a candidate patch, which would hand the agents their first move.
-docs = ["configs/docs/profile_long_flat.txt", "configs/docs/profile_long_callers.txt"]
+docs = [
+  "configs/docs/profile_inputs.txt",
+  "configs/docs/profile_er1000_005_flat.txt",
+  "configs/docs/profile_er1000_005_callers.txt",
+]
+
+# Every input is timed on every attempt, six pairs each, and every result is
+# recorded. The set spans the density range because a patch can trade one end of
+# it for the other: stock cost scales with degree, a dense matrix method scales
+# with node count, and the crossover sits near average degree 2. Timing only the
+# first of these taught four of seven winning patches to be up to 4x slower than
+# stock on sparse graphs. artifacts/generality.md has the measurements.
+#
+# noise_floor is per input because it is a property of how long the call takes,
+# not of the patch: a 1ms call's ratio scatters about twice as wide as a 1.4s
+# one. A regression is a ratio below 1/noise_floor, so the test is symmetric.
+
+[[target.inputs]]
+name = "er1000_005"
+graph = "nx.erdos_renyi_graph(1000, 0.05, seed=42, directed=True)"
+noise_floor = 1.0106          # measurement C, 48 pairs on this graph; checked by tests/test_thresholds.py
+
+[[target.inputs]]
+name = "er1000_001"
+graph = "nx.erdos_renyi_graph(1000, 0.01, seed=42, directed=True)"
+noise_floor = 1.03            # PROVISIONAL, laptop p99 rounded up; replace with the box calibration
+
+[[target.inputs]]
+name = "er1000_0002"
+graph = "nx.erdos_renyi_graph(1000, 0.002, seed=42, directed=True)"
+noise_floor = 1.04            # PROVISIONAL, sits on the measured crossover
+
+[[target.inputs]]
+name = "gn800"
+graph = "nx.gn_graph(800, seed=3)"
+noise_floor = 1.03            # PROVISIONAL, scale free, average degree about 1
+
+[[target.inputs]]
+name = "er1600_002"
+graph = "nx.erdos_renyi_graph(1600, 0.02, seed=42, directed=True)"
+noise_floor = 1.02            # PROVISIONAL, above the 1400 node guard some patches use
 
 [worker]
 model = "deepseek/deepseek-v4-pro-0813"
@@ -30,9 +69,7 @@ max_input_tokens = 8000000
 turn_timeout = 600            # Sail's default per request
 
 [referee]
-pairs = 6
-noise_floor = 1.0106          # measurement C, 6 pairs, 1 in 100 false alarms; checked by tests/test_thresholds.py
-                              # a label, not a gate: every patch is measured and recorded regardless
+pairs = 6                     # per input. noise_floor moved to [[target.inputs]]
 repeats_per_launch = 7
 min_clean_pairs = 4
 hash_seeds = [0, 1, 2, 3, 4]

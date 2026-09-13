@@ -26,7 +26,7 @@ ROOT = Path(__file__).parent.parent
 
 
 def make_config(width: int) -> RunConfig:
-    cfg = load_config(ROOT / "configs" / "t1_w1.toml")
+    cfg = load_config(ROOT / "configs" / "t1_w4d.toml")
     return replace(cfg, width=width, rounds=3, target=replace(cfg.target, docs=()))
 
 
@@ -80,7 +80,7 @@ def test_width_one_measures_and_records_best_so_far(tmp_path: Path) -> None:
 
     inp = worker.inputs[0]
     assert inp.base_sha == BASE_SHA and inp.history == ()
-    assert inp.cache_key.startswith("t1_w1-")
+    assert inp.cache_key.startswith("t1_w4d-")
     # The referee box was never asked to move off the base.
     assert not any("git apply" in c for c in factory.created[0].commands)
 

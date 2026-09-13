@@ -1,9 +1,17 @@
-# Target 1, width 1. The first 20 rounds are the pilot; the run continues to 32.
+# Target 1, width 4, third pass: the first run under the multi input referee.
+#
+# t1_w4 and t1_w4b both timed one graph. That taught the agents to specialise to
+# it: their best patches reached 69x and 79x on that graph while being up to 4x
+# slower than stock on sparse ones. The referee now times five inputs and grades
+# on their geometric mean, and a patch slower on any input cannot count as a real
+# speedup. artifacts/generality.md has the measurements.
+#
+# Otherwise byte for byte t1_w4b.toml, so the comparison against it is clean.
 # Every number is either a user decision or a Phase 1 measurement, noted inline.
 
 [run]
-run_id = "t1_w1"
-width = 1
+run_id = "t1_w4c"
+width = 4
 rounds = 32
 
 [target]
@@ -31,33 +39,46 @@ docs = [
 # stock on sparse graphs. artifacts/generality.md has the measurements.
 #
 # noise_floor is per input because it is a property of how long the call takes,
-# not of the patch: a 1ms call's ratio scatters about twice as wide as a 1.4s
-# one. A regression is a ratio below 1/noise_floor, so the test is symmetric.
+# not of the patch. Measured on a referee box, 42 base against base pairs each,
+# the referee's own pairing plan: standard deviation of the null ratio runs
+# 0.0079 at a 1.5s call and 0.0214 at a 4ms one. A regression is a ratio below
+# 1/noise_floor, so the test is symmetric. The record is
+# artifacts/calibration/20260912-161509.jsonl and the calibration is
+# reproducible with: uv run calibrate.py configs/t1_w4c.toml --rounds 7
 
 [[target.inputs]]
 name = "er1000_005"
 graph = "nx.erdos_renyi_graph(1000, 0.05, seed=42, directed=True)"
-noise_floor = 1.0106          # measurement C, 48 pairs on this graph; checked by tests/test_thresholds.py
+noise_floor = 1.0106          # measurement C, 48 pairs; checked by tests/test_thresholds.py.
+                              # Kept over the 1.0082 this box's 42 pairs gave, so the column
+                              # stays comparable with t1_w4 and t1_w4b, and it is the stricter
+                              # of the two. The two agreeing to 0.24pp is what says the
+                              # calibration below measures what measurement C measured.
 
 [[target.inputs]]
 name = "er1000_001"
 graph = "nx.erdos_renyi_graph(1000, 0.01, seed=42, directed=True)"
-noise_floor = 1.03            # PROVISIONAL, laptop p99 rounded up; replace with the box calibration
+noise_floor = 1.0151          # calibrated, 42 clean pairs, null sd 0.0106
 
 [[target.inputs]]
 name = "er1000_0002"
 graph = "nx.erdos_renyi_graph(1000, 0.002, seed=42, directed=True)"
-noise_floor = 1.04            # PROVISIONAL, sits on the measured crossover
+noise_floor = 1.0280          # calibrated, 42 clean pairs, null sd 0.0194. The loosest floor
+                              # of the five: a 9ms call, so only a gross regression here is
+                              # distinguishable from noise.
 
 [[target.inputs]]
 name = "gn800"
 graph = "nx.gn_graph(800, seed=3)"
-noise_floor = 1.03            # PROVISIONAL, scale free, average degree about 1
+noise_floor = 1.0218          # calibrated, 42 clean pairs, null sd 0.0214
 
 [[target.inputs]]
 name = "er1600_002"
 graph = "nx.erdos_renyi_graph(1600, 0.02, seed=42, directed=True)"
-noise_floor = 1.02            # PROVISIONAL, above the 1400 node guard some patches use
+noise_floor = 1.0193          # calibrated, 40 clean of 42 pairs, null sd 0.0569. The two the
+                              # steal guard dropped, and two clean pairs at 0.73x and 1.20x,
+                              # make this the only input with a tail the guard misses. The
+                              # floor is a median of 6, which those outliers do not move.
 
 [worker]
 model = "deepseek/deepseek-v4-pro-0813"

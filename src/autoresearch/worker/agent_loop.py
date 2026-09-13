@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import tempfile
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -75,7 +76,8 @@ class AgentLoopWorker:
 
     # ----- box setup -----------------------------------------------------------------
 
-    def _prepare_box(self, box: Box, inp: WorkerInput) -> None:
+    def _prepare_box(self, box: Box, inp: WorkerInput) -> str:
+        """Set the box up and return the Python version it runs, as the prompt states it."""
         box.upload_dir(GUEST_SOURCE, GUEST_DIR)
         # The image cloned the repo at the base commit. Check it out explicitly and
         # confirm HEAD, so a stale image or a wrong config cannot go unnoticed.
@@ -86,13 +88,17 @@ class AgentLoopWorker:
         # every launch and look slower than the working tree, which biases
         # run_benchmark in the agent's favour. Compiling both also removes the
         # cold start that used to fall on whichever tree ran first.
+        #
+        # The Python version is printed by the same command, so telling the
+        # worker what it has costs no extra round trip and is never guessed.
         r = box.run(
             f"cd {REPO_DIR} && git checkout -q --detach {inp.base_sha}"
             f" && git rev-parse HEAD"
             f" && rm -rf {BASE_DIR} && git worktree prune"
             f" && git worktree add -q --detach {BASE_DIR} HEAD"
             f" && python3 -m compileall -q {REPO_DIR} {BASE_DIR} > /dev/null"
-            f" && chmod -R a-w {BASE_DIR}",
+            f" && chmod -R a-w {BASE_DIR}"
+            f" && python3 -c 'import sys; print(\"python\", sys.version.split()[0])'",
             timeout=SETUP_TIMEOUT,
         )
         if not r.ok:
@@ -100,7 +106,11 @@ class AgentLoopWorker:
         head = r.stdout.split()[0] if r.stdout.split() else ""
         if head != inp.base_sha:
             raise BoxError(f"worker box is at {head}, not the base {inp.base_sha}")
+        versions = [ln.split()[1] for ln in r.stdout.splitlines() if ln.startswith("python ")]
+        if not versions:
+            raise BoxError("worker box did not report its Python version")
         self._upload_history(box, inp.history)
+        return versions[-1]
 
     @staticmethod
     def _history_files(history: tuple[Attempt, ...]) -> dict[str, bytes]:
@@ -195,7 +205,7 @@ class AgentLoopWorker:
             box_id = box.box_id
             transcript.add(kind="box", box_id=box_id)
             trace.box(box_id)
-            self._prepare_box(box, inp)
+            python = self._prepare_box(box, inp)
         except BoxError as e:
             if box is not None:
                 box.terminate()
@@ -203,16 +213,16 @@ class AgentLoopWorker:
 
         ctx = tools.ToolContext(box=box, target=inp.target)
         messages: list[Message] = [
-            {"role": "system", "content": prompt.SYSTEM_PROMPT},
+            {"role": "system", "content": prompt.system_prompt(python)},
             {
                 "role": "user",
                 "content": prompt.initial_user_message(
                     inp.target,
                     inp.base_sha,
-                    self._config.referee.noise_floor,
                     inp.docs,
                     inp.history,
                     inp.ref.number,
+                    self._config.referee.pairs,
                 ),
             },
         ]
@@ -285,4 +295,11 @@ class AgentLoopWorker:
         except BoxError as e:
             return finish(StopReason.BOX_ERROR, error=str(e))
         finally:
-            box.terminate()
+            # The one place a BoxError is swallowed. This runs after the return
+            # value is built, so raising here would discard a finished attempt,
+            # patch and all, and take the round down with it: the orchestrator
+            # maps over the workers and one raising ends the round. A box that
+            # will not terminate is a leak, visible in Sailbox.list and billed
+            # until autosleep, which is worth less than the attempt.
+            with suppress(BoxError):
+                box.terminate()

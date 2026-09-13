@@ -8,7 +8,7 @@ from autoresearch.config import load_config
 from autoresearch.control import deploy as ctl
 
 ROOT = Path(__file__).parent.parent
-CFG = load_config(ROOT / "configs" / "t1_w1.toml")
+CFG = load_config(ROOT / "configs" / "t1_w4d.toml")
 
 
 def _repo(tmp_path: Path) -> Path:
@@ -63,13 +63,13 @@ def test_control_record_round_trip(tmp_path: Path) -> None:
 def test_launch_starts_a_detached_run_with_the_keys_only_in_env() -> None:
     box = FakeBox()
     envs = {"SAIL_API_KEY": "sk_secret", "LANGFUSE_SECRET_KEY": "sk-lf-secret"}
-    cmd = ctl.launch(CFG, "configs/t1_w1.toml", box, envs)
+    cmd = ctl.launch(CFG, "configs/t1_w4d.toml", box, envs)
     assert box.started == [(cmd, envs)]
-    assert cmd.startswith(f"cd {ctl.PACKAGE_DIR} && nohup {ctl.CLI} run configs/t1_w1.toml")
-    assert "/mnt/autoresearch/runs/t1_w1.launch.log" in cmd and cmd.endswith("&")
+    assert cmd.startswith(f"cd {ctl.PACKAGE_DIR} && nohup {ctl.CLI} run configs/t1_w4d.toml")
+    assert "/mnt/autoresearch/runs/t1_w4d.launch.log" in cmd and cmd.endswith("&")
     # No key may reach the command line: it is visible to anything reading ps.
     assert "sk_secret" not in cmd and "sk-lf-secret" not in cmd
-    cmd = ctl.launch(CFG, "configs/t1_w1.toml", FakeBox(), {"SAIL_API_KEY": "k"}, until=1)
+    cmd = ctl.launch(CFG, "configs/t1_w4d.toml", FakeBox(), {"SAIL_API_KEY": "k"}, until=1)
     assert " --until 1 >>" in cmd
 
 
@@ -91,7 +91,7 @@ def test_nothing_in_a_box_calls_the_console_script(tmp_path: Path) -> None:
     commands = [
         *factory.created[0].commands,
         *box.commands,
-        ctl.launch_command(CFG, "configs/t1_w1.toml"),
+        ctl.launch_command(CFG, "configs/t1_w4d.toml"),
     ]
     for cmd in commands:
         tokens = cmd.split()
@@ -103,9 +103,9 @@ def test_nothing_in_a_box_calls_the_console_script(tmp_path: Path) -> None:
 
 
 def test_remote_status_and_fetch(tmp_path: Path) -> None:
-    box = FakeBox().on("-m autoresearch status", ok("run t1_w1: 3 of 32 rounds\n"))
+    box = FakeBox().on("-m autoresearch status", ok("run t1_w4d: 3 of 32 rounds\n"))
     assert "3 of 32" in ctl.remote_status(CFG, box)
-    box.files["/mnt/autoresearch/runs/t1_w1/rounds.jsonl"] = b"{}\n"
+    box.files["/mnt/autoresearch/runs/t1_w4d/rounds.jsonl"] = b"{}\n"
     local = ctl.fetch(CFG, box, tmp_path / "runs")
-    assert local == tmp_path / "runs" / "t1_w1"
+    assert local == tmp_path / "runs" / "t1_w4d"
     assert (local / "rounds.jsonl").read_bytes() == b"{}\n"

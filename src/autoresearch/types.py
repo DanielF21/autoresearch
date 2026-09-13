@@ -13,8 +13,11 @@ command, never decided by the referee.
 from __future__ import annotations
 
 import enum
+import math
 from dataclasses import dataclass, field
 from typing import Any
+
+from autoresearch.referee.thresholds import PILOT_NOISE_FLOOR
 
 
 class StopReason(enum.StrEnum):
@@ -170,6 +173,11 @@ class PairTiming:
     ``ratio`` is base seconds over patched seconds, so above 1 means the patch
     was faster in this pair. A contaminated pair is one where either launch tripped a
     provenance guard; it is kept in the record and excluded from the median.
+
+    ``base_fixed_s`` and ``patched_fixed_s`` are what each launch paid before its
+    first timed call: interpreter start, the import and the input's setup, as
+    the guest measured its own process age. None in records written before the
+    guest reported it, and on a machine with no /proc.
     """
 
     index: int
@@ -179,6 +187,8 @@ class PairTiming:
     patched_s: float
     contaminated: bool
     reasons: tuple[str, ...] = ()
+    base_fixed_s: float | None = None
+    patched_fixed_s: float | None = None
 
     @property
     def ratio(self) -> float:
@@ -194,10 +204,14 @@ class PairTiming:
             "ratio": self.ratio,
             "contaminated": self.contaminated,
             "reasons": list(self.reasons),
+            "base_fixed_s": self.base_fixed_s,
+            "patched_fixed_s": self.patched_fixed_s,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> PairTiming:
+        base_fixed = d.get("base_fixed_s")
+        patched_fixed = d.get("patched_fixed_s")
         return cls(
             index=int(d["index"]),
             order=str(d["order"]),
@@ -206,6 +220,71 @@ class PairTiming:
             patched_s=float(d["patched_s"]),
             contaminated=bool(d["contaminated"]),
             reasons=tuple(str(r) for r in d.get("reasons", [])),
+            base_fixed_s=None if base_fixed is None else float(base_fixed),
+            patched_fixed_s=None if patched_fixed is None else float(patched_fixed),
+        )
+
+
+@dataclass(frozen=True)
+class InputTiming:
+    """Everything the referee established about one patch on one benchmark input.
+
+    Each input carries its own noise floor, because the floor is a property of
+    how long the call takes rather than of the patch. ``regresses`` is the
+    mirror of ``improves``: as far below 1 as the floor is above it, so the test
+    is symmetric and a slowdown has to clear the same bar a speedup does.
+    """
+
+    name: str
+    noise_floor: float
+    base_fp: str = ""
+    patched_fp: str = ""
+    pairs: tuple[PairTiming, ...] = ()
+    speedup: float | None = None
+    retried: bool = False
+    errors: tuple[str, ...] = ()
+
+    @property
+    def result_matches(self) -> bool | None:
+        if not self.base_fp or not self.patched_fp:
+            return None
+        return self.base_fp == self.patched_fp
+
+    @property
+    def improves(self) -> bool:
+        return self.speedup is not None and self.speedup >= self.noise_floor
+
+    @property
+    def regresses(self) -> bool:
+        return self.speedup is not None and self.speedup < 1.0 / self.noise_floor
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "noise_floor": self.noise_floor,
+            "base_fp": self.base_fp,
+            "patched_fp": self.patched_fp,
+            "result_matches": self.result_matches,
+            "pairs": [p.to_dict() for p in self.pairs],
+            "speedup": self.speedup,
+            "improves": self.improves,
+            "regresses": self.regresses,
+            "retried": self.retried,
+            "errors": list(self.errors),
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> InputTiming:
+        speedup = d.get("speedup")
+        return cls(
+            name=str(d["name"]),
+            noise_floor=float(d["noise_floor"]),
+            base_fp=str(d.get("base_fp", "")),
+            patched_fp=str(d.get("patched_fp", "")),
+            pairs=tuple(PairTiming.from_dict(p) for p in d.get("pairs", [])),
+            speedup=None if speedup is None else float(speedup),
+            retried=bool(d.get("retried", False)),
+            errors=tuple(str(e) for e in d.get("errors", [])),
         )
 
 
@@ -235,6 +314,12 @@ class Provenance:
         return cls(**{k: str(d.get(k, "")) for k in cls.__dataclass_fields__})
 
 
+# Records written before the referee timed more than one input have their single
+# input's timing at the top level, with no name for it. They are read into one
+# InputTiming under this name. See Measurement.from_dict.
+LEGACY_INPUT_NAME = "benchmark"
+
+
 @dataclass(frozen=True)
 class Measurement:
     """Every fact the referee could establish about one patch against the base.
@@ -242,19 +327,23 @@ class Measurement:
     Steps that could not run leave their field empty or None and add a line to
     ``errors``. Nothing here is a decision. ``clears_noise`` is the one derived
     label: the patch applied, was in scope, passed both suites, computed the same
-    result, and its median ratio reached the noise floor.
+    result on every input, was not slower on any of them, and was faster on at
+    least one.
+
+    ``speedup`` is the geometric mean across the inputs. A geometric mean
+    penalises imbalance by a squared deviation term in log space, so a patch
+    that is enormous on one input and flat on the rest scores near the flat
+    value: breadth is worth as much as the input count. It does not replace the
+    no regression rule, because a mean prices a slowdown as a finite penalty and
+    a large enough spike can outrun one. artifacts/generality.md section 7.
     """
 
-    noise_floor: float
     applied: bool = False
     apply_error: str = ""
     scope_violations: tuple[str, ...] = ()
     tests: tuple[SuiteResult, ...] = ()
-    base_fp: str = ""
-    patched_fp: str = ""
     canary_s: float | None = None
-    pairs: tuple[PairTiming, ...] = ()
-    speedup: float | None = None
+    inputs: tuple[InputTiming, ...] = ()
     errors: tuple[str, ...] = ()
     provenance: Provenance = field(default_factory=Provenance)
     wall_s: float = 0.0
@@ -265,10 +354,40 @@ class Measurement:
         return bool(scopes) and all(scopes.values()) and "module" in scopes and "full" in scopes
 
     @property
-    def result_matches(self) -> bool | None:
-        if not self.base_fp or not self.patched_fp:
+    def ratios(self) -> tuple[float, ...]:
+        """Every input that produced a ratio. An input whose timing failed has none.
+
+        A ratio is base seconds over patched seconds and both are positive, so
+        the zero guard is only so a corrupt record cannot raise out of a
+        property.
+        """
+        return tuple(i.speedup for i in self.inputs if i.speedup is not None and i.speedup > 0)
+
+    @property
+    def speedup(self) -> float | None:
+        """Geometric mean over the timed inputs, or None if nothing was timed."""
+        ratios = self.ratios
+        if not ratios:
             return None
-        return self.base_fp == self.patched_fp
+        return math.exp(sum(math.log(r) for r in ratios) / len(ratios))
+
+    @property
+    def worst_speedup(self) -> float | None:
+        ratios = self.ratios
+        return min(ratios) if ratios else None
+
+    @property
+    def regressions(self) -> tuple[str, ...]:
+        """Names of inputs the patch made detectably slower. Empty is the bar."""
+        return tuple(i.name for i in self.inputs if i.regresses)
+
+    @property
+    def result_matches(self) -> bool | None:
+        """True only if every input computed the same thing on both trees."""
+        seen = [i.result_matches for i in self.inputs]
+        if not seen or any(s is None for s in seen):
+            return None
+        return all(seen)
 
     @property
     def clears_noise(self) -> bool:
@@ -277,24 +396,23 @@ class Measurement:
             and not self.scope_violations
             and self.tests_pass
             and self.result_matches is True
-            and self.speedup is not None
-            and self.speedup >= self.noise_floor
+            and not self.regressions
+            and any(i.improves for i in self.inputs)
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "noise_floor": self.noise_floor,
             "applied": self.applied,
             "apply_error": self.apply_error,
             "scope_violations": list(self.scope_violations),
             "tests": [t.to_dict() for t in self.tests],
             "tests_pass": self.tests_pass,
-            "base_fp": self.base_fp,
-            "patched_fp": self.patched_fp,
             "result_matches": self.result_matches,
             "canary_s": self.canary_s,
-            "pairs": [p.to_dict() for p in self.pairs],
+            "inputs": [i.to_dict() for i in self.inputs],
             "speedup": self.speedup,
+            "worst_speedup": self.worst_speedup,
+            "regressions": list(self.regressions),
             "clears_noise": self.clears_noise,
             "errors": list(self.errors),
             "provenance": self.provenance.to_dict(),
@@ -303,26 +421,42 @@ class Measurement:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Measurement:
-        # An older record may carry an "ir" block from when the referee ran
-        # cachegrind. It is read past, never rewritten; see
-        # artifacts/instruction_counting.md.
-        median = d.get("speedup")
+        # Two shapes of older record are read past and never rewritten. An "ir"
+        # block is from when the referee ran cachegrind; see
+        # artifacts/instruction_counting.md. A top level "pairs" with no
+        # "inputs" is from when it timed one benchmark; see
+        # artifacts/generality.md. Neither is written again.
         canary = d.get("canary_s")
         return cls(
-            noise_floor=float(d["noise_floor"]),
             applied=bool(d.get("applied", False)),
             apply_error=str(d.get("apply_error", "")),
             scope_violations=tuple(str(v) for v in d.get("scope_violations", [])),
             tests=tuple(SuiteResult.from_dict(t) for t in d.get("tests", [])),
-            base_fp=str(d.get("base_fp", "")),
-            patched_fp=str(d.get("patched_fp", "")),
             canary_s=None if canary is None else float(canary),
-            pairs=tuple(PairTiming.from_dict(p) for p in d.get("pairs", [])),
-            speedup=None if median is None else float(median),
+            inputs=_inputs_from_dict(d),
             errors=tuple(str(e) for e in d.get("errors", [])),
             provenance=Provenance.from_dict(d.get("provenance", {})),
             wall_s=float(d.get("wall_s", 0.0)),
         )
+
+
+def _inputs_from_dict(d: dict[str, Any]) -> tuple[InputTiming, ...]:
+    """The record's inputs, reading a single input record from before the change."""
+    if "inputs" in d:
+        return tuple(InputTiming.from_dict(i) for i in d["inputs"])
+    if "pairs" not in d and "speedup" not in d:
+        return ()
+    speedup = d.get("speedup")
+    return (
+        InputTiming(
+            name=LEGACY_INPUT_NAME,
+            noise_floor=float(d.get("noise_floor", PILOT_NOISE_FLOOR)),
+            base_fp=str(d.get("base_fp", "")),
+            patched_fp=str(d.get("patched_fp", "")),
+            pairs=tuple(PairTiming.from_dict(p) for p in d.get("pairs", [])),
+            speedup=None if speedup is None else float(speedup),
+        ),
+    )
 
 
 @dataclass(frozen=True)

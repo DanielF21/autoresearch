@@ -14,14 +14,15 @@ set, is what keeps a patch honest.
 from __future__ import annotations
 
 import json
-import shlex
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from autoresearch.boxes.image import BASE_DIR, GUEST_DIR, REPO_DIR
+from autoresearch.boxes.image import BASE_DIR, REPO_DIR
 from autoresearch.boxes.protocol import Box
 from autoresearch.config import TargetSpec
+from autoresearch.referee.referee import PIN_CORE, guest_command, target_args
 
 MAX_OUTPUT = 12_000
 SHELL_TIMEOUT_MAX = 900
@@ -73,9 +74,10 @@ def _int(args: dict[str, Any], key: str, default: int | None) -> int | None:
 # ----- executors ---------------------------------------------------------------------
 
 
-def _guest(ctx: ToolContext, script: str, *args: str, timeout: int) -> dict[str, Any]:
-    quoted = " ".join(shlex.quote(a) for a in args)
-    r = ctx.box.run(f"cd {GUEST_DIR} && python3 {script} {quoted}", timeout=timeout)
+def _guest(
+    ctx: ToolContext, script: str, *args: str, timeout: int, pin: int | None = None
+) -> dict[str, Any]:
+    r = ctx.box.run(guest_command(script, *args, pin=pin), timeout=timeout)
     line = r.last_json_line()
     if line is None:
         return {"error": f"{script} failed (rc {r.exit_code}): {r.stderr[-800:]}"}
@@ -97,8 +99,10 @@ def run_tests(ctx: ToolContext, _args: dict[str, Any]) -> ToolResult:
         "run_tests.py",
         "--root",
         ctx.repo,
+        "--package-root",
+        ctx.target.package_root,
         "--target",
-        ctx.target.test_file,
+        ctx.target.tests.module,
         "--scope",
         "module",
         "--workers",
@@ -121,37 +125,65 @@ def run_tests(ctx: ToolContext, _args: dict[str, Any]) -> ToolResult:
 
 
 def run_benchmark(ctx: ToolContext, _args: dict[str, Any]) -> ToolResult:
-    """Two back to back pairs of the working tree against the untouched base commit.
-    Noisy by design: it tells the worker whether it is warm or cold. The referee's
-    six pairs are the measurement that goes into history."""
+    """Two back to back pairs per input, working tree against the untouched base.
+
+    Every input, not just the first, because a patch can be enormous on one and
+    slower on another and the worker has no other way to see that. Noisy by
+    design: it says whether the tree is warm or cold. The referee's own pairs,
+    more of them per input, are the measurement that goes into history.
+
+    Pinned to the same core the referee pins to, so a change that spreads work
+    across cores looks the same here as it will there.
+    """
     t = ctx.target
-    common = [
-        "--graph",
-        t.graph,
-        "--call",
-        t.call,
-        "--hot",
-        t.hot_file,
-        "--repeats",
-        "3",
-        "--no-counters",
-    ]
+    lines: list[str] = []
     ratios: list[float] = []
-    for order in (("base", "working"), ("working", "base")):
-        times: dict[str, float] = {}
-        for which in order:
-            root = ctx.base if which == "base" else ctx.repo
-            rec = _guest(ctx, "time_target.py", "--root", root, *common, timeout=600)
-            if rec.get("error"):
-                return ToolResult(f"error: {rec['error']}")
-            times[which] = float(rec["min_all"])
-        ratios.append(times["base"] / times["working"])
-    mean = sum(ratios) / len(ratios)
-    return ToolResult(
-        f"indicative speedup {mean:.3f}x (pairs: {ratios[0]:.3f}, {ratios[1]:.3f}). "
-        "This is 2 pairs on a shared machine; the referee uses 6 pairs, and only a median "
-        "ratio at or above the noise floor of 1.0106 counts as a real speedup."
+    for spec in t.inputs:
+        pair_ratios: list[float] = []
+        failed = ""
+        for order in (("base", "working"), ("working", "base")):
+            times: dict[str, float] = {}
+            for which in order:
+                root = ctx.base if which == "base" else ctx.repo
+                rec = _guest(
+                    ctx,
+                    "time_target.py",
+                    *target_args(t, root, spec),
+                    "--repeats",
+                    "3",
+                    "--no-counters",
+                    timeout=600,
+                    pin=PIN_CORE,
+                )
+                if rec.get("error"):
+                    failed = str(rec["error"])
+                    break
+                times[which] = float(rec["min_all"])
+            if failed:
+                break
+            pair_ratios.append(times["base"] / times["working"])
+        if failed:
+            lines.append(f"  {spec.name:<14} error: {_clip(failed, 200)}")
+            continue
+        mean = sum(pair_ratios) / len(pair_ratios)
+        ratios.append(mean)
+        flag = "  <-- SLOWER" if mean < 1.0 else ""
+        lines.append(
+            f"  {spec.name:<14} {mean:>8.3f}x   (pairs "
+            f"{pair_ratios[0]:.3f}, {pair_ratios[1]:.3f}){flag}"
+        )
+    head = "indicative speedup per input, 2 pairs each on a shared machine:\n"
+    if not ratios:
+        return ToolResult(head + "\n".join(lines) + "\nNothing timed.")
+    geo = math.exp(sum(math.log(r) for r in ratios if r > 0) / len(ratios))
+    worst = min(ratios)
+    tail = (
+        f"\ngeometric mean {geo:.3f}x, worst {worst:.3f}x. The referee scores the geometric "
+        "mean over all inputs and records a patch as a real speedup only if no input is "
+        "slower and at least one clears its own noise floor. Being slower anywhere "
+        "disqualifies a patch however fast it is elsewhere."
     )
+    return ToolResult(head + "\n".join(lines) + tail)
 
 
 def shell(ctx: ToolContext, args: dict[str, Any]) -> ToolResult:
@@ -216,8 +248,11 @@ TOOLS: tuple[Tool, ...] = (
     ),
     Tool(
         "run_benchmark",
-        "Time the target on your working tree against the untouched base commit, two back to "
-        "back pairs. Indicative only: noisy, and not the referee's measurement.",
+        "Time the target on your working tree against the untouched base commit, on every "
+        "benchmark input, two back to back pairs each. Reports a ratio per input plus their "
+        "geometric mean. Indicative only: noisy, and not the referee's measurement. Run it "
+        "before you submit: a patch that is slower on any input cannot count as a speedup, "
+        "and this is the only way to see that coming.",
         _params({}, []),
         run_benchmark,
     ),
@@ -233,8 +268,9 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         "submit",
         "Finish the attempt. The harness takes git diff of your working tree as the patch. "
-        "State the speedup you predict the referee will measure on the target benchmark as a "
-        "ratio, for example 1.15 for 15 percent faster, and a rationale a maintainer could read.",
+        "State the speedup you predict the referee will record, which is the geometric mean "
+        "over every input, as a ratio, for example 1.15 for 15 percent faster, and a "
+        "rationale a maintainer could read.",
         _params(
             {"predicted_speedup": {"type": "number"}, "rationale": {"type": "string"}},
             ["predicted_speedup", "rationale"],

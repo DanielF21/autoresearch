@@ -50,9 +50,7 @@ def load_docs(paths: history.RunPaths) -> tuple[tuple[str, str], ...]:
     return tuple((p.name, p.read_text()) for p in sorted(paths.target.iterdir()) if p.is_file())
 
 
-def _measure_one(
-    slot: int, pool: RefereePool, patch: str, noise_floor: float
-) -> tuple[Measurement, str]:
+def _measure_one(slot: int, pool: RefereePool, patch: str) -> tuple[Measurement, str]:
     """Measure on the slot's referee. A box failure rebuilds the box and retries once."""
     for attempt in range(2):
         ref = pool.get(slot)
@@ -66,7 +64,7 @@ def _measure_one(
                 pool.rebuild(slot)
                 continue
             return (
-                Measurement(noise_floor=noise_floor, errors=(f"box error: {e}",)),
+                Measurement(errors=(f"box error: {e}",)),
                 f"referee {slot} failed twice: {e}",
             )
     raise AssertionError("unreachable")
@@ -136,10 +134,7 @@ def run_round(
     measurements: dict[int, Measurement] = {}
     t0 = time.perf_counter()
     with ThreadPoolExecutor(max_workers=max(1, len(to_measure))) as ex:
-        futures = {
-            w: ex.submit(_measure_one, w, pool, patch, config.referee.noise_floor)
-            for w, patch in to_measure.items()
-        }
+        futures = {w: ex.submit(_measure_one, w, pool, patch) for w, patch in to_measure.items()}
         for w, fut in futures.items():
             measurement, err = fut.result()
             measurements[w] = measurement

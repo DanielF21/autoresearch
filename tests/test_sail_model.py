@@ -83,7 +83,7 @@ def test_parse_response_without_choices_raises() -> None:
 
 
 def test_payload_carries_the_verified_settings() -> None:
-    cfg = load_config(ROOT / "configs" / "t1_w1.toml").worker
+    cfg = load_config(ROOT / "configs" / "t1_w4d.toml").worker
     model = SailChatModel.__new__(SailChatModel)
     model._config = cfg
     payload = model._payload([{"role": "user", "content": "x"}], [{"type": "function"}], "key")

@@ -27,11 +27,11 @@ DIFF = "diff --git a/x b/x\n--- a\n+++ b\n@@ -1 +1 @@\n-a\n+b\n"
 
 @pytest.fixture
 def config() -> RunConfig:
-    return load_config(ROOT / "configs" / "t1_w1.toml")
+    return load_config(ROOT / "configs" / "t1_w4d.toml")
 
 
 def prepare(box: FakeBox, role: str) -> None:
-    box.on("git checkout -q --detach", ok(f"{BASE_SHA}\n"))
+    box.on("git checkout -q --detach", ok(f"{BASE_SHA}\npython 3.12.4\n"))
     box.on("git add -N", ok(DIFF))
     box.on("cat -n", ok("     1\tdef f(): pass\n"))
 
@@ -136,12 +136,12 @@ def test_the_default_worker_traces_nothing(config: RunConfig) -> None:
 
 
 def test_observe_section_defaults_to_off() -> None:
-    text_without = (ROOT / "configs" / "t1_w1.toml").read_text().split("[observe]")[0]
+    text_without = (ROOT / "configs" / "t1_w4d.toml").read_text().split("[observe]")[0]
     assert parse_config(text_without).observe == ObserveConfig(enabled=False)
 
 
 def test_observe_section_is_validated() -> None:
-    base = (ROOT / "configs" / "t1_w1.toml").read_text().split("[observe]")[0]
+    base = (ROOT / "configs" / "t1_w4d.toml").read_text().split("[observe]")[0]
     with pytest.raises(ConfigError, match="enabled"):
         parse_config(base + '[observe]\nenabled = "yes"\n')
     with pytest.raises(ConfigError, match="session_prefix"):

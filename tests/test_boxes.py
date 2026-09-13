@@ -1,13 +1,21 @@
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from autoresearch.boxes.fake_box import FakeBox, FakeBoxFactory, fail, ok
-from autoresearch.boxes.image import REPO_DIR, clone_commands
+from autoresearch.boxes.image import (
+    APT_PACKAGES,
+    PIP_PACKAGES,
+    REPO_DIR,
+    apt_packages,
+    clone_commands,
+    pip_packages,
+)
 from autoresearch.boxes.protocol import BoxError, CommandResult
 from autoresearch.config import load_config
 
-PILOT = Path(__file__).parent.parent / "configs" / "t1_w1.toml"
+PILOT = Path(__file__).parent.parent / "configs" / "t1_w4d.toml"
 
 
 def test_fake_box_answers_by_substring_and_records_commands() -> None:
@@ -67,8 +75,25 @@ def test_command_result_last_json_line() -> None:
     assert not CommandResult(0, "", "", timed_out=True).ok
 
 
-def test_image_clone_commands_pin_the_sha() -> None:
+def test_image_clone_commands_pin_the_sha_and_fetch_submodules_only_if_declared() -> None:
     target = load_config(PILOT).target
     cmds = clone_commands(target)
     assert cmds[0].startswith(f"git clone -q {target.repo} {REPO_DIR}")
     assert f"git checkout -q {target.sha}" in cmds[1]
+    assert "if [ -f .gitmodules ]" in cmds[2] and "submodule update --init --recursive" in cmds[2]
+
+
+def test_image_packages_are_the_harness_plus_what_the_target_asks_for() -> None:
+    target = load_config(PILOT).target
+    assert apt_packages(target) == APT_PACKAGES
+    assert pip_packages(target) == ("numpy", "scipy", "pandas", "pytest", "pytest-xdist")
+    bare = replace(target, pip=(), apt=("libxml2",))
+    assert pip_packages(bare) == PIP_PACKAGES == ("pytest", "pytest-xdist")
+    assert apt_packages(bare) == (*APT_PACKAGES, "libxml2")
+
+
+def test_a_legacy_config_composes_the_image_its_runs_were_built_on() -> None:
+    """runs/t1_w4c resumes on boxes from this image; its spec must not move."""
+    legacy = load_config(PILOT.parent / "t1_w4c.toml").target
+    assert pip_packages(legacy) == ("numpy", "scipy", "pandas", "pytest", "pytest-xdist")
+    assert apt_packages(legacy) == ("git", "curl", "build-essential", "time", "util-linux")

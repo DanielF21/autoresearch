@@ -23,7 +23,7 @@ NAMES = ("whitespace", "slowdown", "precompute", "wrong_result")
 
 @pytest.mark.parametrize("name", NAMES)
 def test_fixture_patch_is_in_scope_and_touches_only_the_hot_file(name: str) -> None:
-    target = load_config(ROOT / "configs" / "t1_w1.toml").target
+    target = load_config(ROOT / "configs" / "t1_w4d.toml").target
     diff = (PATCHES / f"{name}.diff").read_text()
     assert changed_files(diff) == (target.hot_file,)
     assert scope_violations(changed_files(diff), target.allow, target.deny) == ()

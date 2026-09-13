@@ -1,0 +1,119 @@
+# Target 1, width 4, in the target agnostic config shape.
+#
+# The same experiment as t1_w4c.toml: five inputs, calibrated floors, geometric
+# mean, no regression gate. What differs is only how the target is written down.
+# The harness no longer knows what networkx is: the package, the name it is
+# bound to, its dependencies, its test paths and each input's setup are all
+# stated here. t1_w4c.toml is kept byte for byte because runs/t1_w4c resumes
+# against it; this file is the form any future networkx run uses.
+#
+# Every number is either a user decision or a measurement, noted inline.
+
+[run]
+run_id = "t1_w4d"
+width = 4
+rounds = 32
+
+[target]
+name = "networkx_clustering_er1000_005"
+repo = "https://github.com/networkx/networkx"
+sha = "c94928ed94899033126c9d47f797a1f698584b20"
+package = "networkx"          # imported by path from the tree under test, never installed
+alias = "nx"                  # the name the package is bound to in setup and call
+package_root = "."            # flat layout: the package directory sits at the repo root
+hot_file = "networkx/algorithms/cluster.py"
+call = "nx.clustering(G)"
+pip = ["numpy", "scipy", "pandas"]   # networkx's optional backends, imported by its test suite
+allow = ["networkx/**"]
+deny = ["networkx/**/tests/**", "benchmarks/**"]
+# Shown to every worker. The profiles only; artifacts/repo.md is left out because
+# it names a candidate patch, which would hand the agents their first move.
+docs = [
+  "configs/docs/profile_inputs.txt",
+  "configs/docs/profile_er1000_005_flat.txt",
+  "configs/docs/profile_er1000_005_callers.txt",
+]
+
+[target.tests]
+module = "networkx/algorithms/tests/test_cluster.py"
+full = "networkx"             # the suite lives inside the package directory
+
+# Every input is timed on every attempt, six pairs each, and every result is
+# recorded. The set spans the density range because a patch can trade one end of
+# it for the other: stock cost scales with degree, a dense matrix method scales
+# with node count, and the crossover sits near average degree 2. Timing only the
+# first of these taught four of seven winning patches to be up to 4x slower than
+# stock on sparse graphs. artifacts/generality.md has the measurements.
+#
+# setup runs once per launch with nx bound; call is evaluated in the same
+# namespace. noise_floor is per input because it is a property of how long the
+# call takes, not of the patch. Measured on a referee box, 42 base against base
+# pairs each, the referee's own pairing plan: standard deviation of the null
+# ratio runs 0.0079 at a 1.5s call and 0.0214 at a 4ms one. A regression is a
+# ratio below 1/noise_floor, so the test is symmetric. The record is
+# artifacts/calibration/20260912-161509.jsonl and the calibration is
+# reproducible with: uv run calibrate.py configs/t1_w4d.toml --rounds 7
+
+[[target.inputs]]
+name = "er1000_005"
+setup = "G = nx.erdos_renyi_graph(1000, 0.05, seed=42, directed=True)"
+noise_floor = 1.0106          # measurement C, 48 pairs; checked by tests/test_thresholds.py.
+                              # Kept over the 1.0082 this box's 42 pairs gave, so the column
+                              # stays comparable with t1_w4 and t1_w4b, and it is the stricter
+                              # of the two.
+
+[[target.inputs]]
+name = "er1000_001"
+setup = "G = nx.erdos_renyi_graph(1000, 0.01, seed=42, directed=True)"
+noise_floor = 1.0151          # calibrated, 42 clean pairs, null sd 0.0106
+
+[[target.inputs]]
+name = "er1000_0002"
+setup = "G = nx.erdos_renyi_graph(1000, 0.002, seed=42, directed=True)"
+noise_floor = 1.0280          # calibrated, 42 clean pairs, null sd 0.0194. The loosest floor
+                              # of the five: a 9ms call, so only a gross regression here is
+                              # distinguishable from noise.
+
+[[target.inputs]]
+name = "gn800"
+setup = "G = nx.gn_graph(800, seed=3)"
+noise_floor = 1.0218          # calibrated, 42 clean pairs, null sd 0.0214
+
+[[target.inputs]]
+name = "er1600_002"
+setup = "G = nx.erdos_renyi_graph(1600, 0.02, seed=42, directed=True)"
+noise_floor = 1.0193          # calibrated, 40 clean of 42 pairs, null sd 0.0569. The two the
+                              # steal guard dropped, and two clean pairs at 0.73x and 1.20x,
+                              # make this the only input with a tail the guard misses. The
+                              # floor is a median of 6, which those outliers do not move.
+
+[worker]
+model = "deepseek/deepseek-v4-pro-0813"
+reasoning_effort = "high"
+completion_window = "asap"
+max_turns = 80
+max_seconds = 3600
+max_input_tokens = 8000000
+turn_timeout = 600            # Sail's default per request
+
+[referee]
+pairs = 6                     # per input
+repeats_per_launch = 7
+min_clean_pairs = 4
+hash_seeds = [0, 1, 2, 3, 4]
+
+[boxes]
+worker_size = "m"
+referee_size = "m"
+control_size = "s"
+disk_gib = 32
+
+[storage]
+volume = "autoresearch"
+mount = "/mnt/autoresearch"
+
+[observe]
+# Live tracing of worker attempts in Langfuse. A view only: the run directory
+# stays the record. Keys come from the environment, and without them this is a
+# quiet no op.
+enabled = true

@@ -1,0 +1,25 @@
+cProfile of nx.clustering(G) with G = nx.erdos_renyi_graph(1000, 0.05, seed=42, directed=True)
+at networkx c94928ed9489, the base commit for every attempt.
+
+         1187731 function calls in 0.996 seconds
+
+   Ordered by: internal time
+   List reduced from 18 to 14 due to restriction <14>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+     1001    0.840    0.001    0.996    0.001 networkx/algorithms/cluster.py:160(_directed_triangles_and_degree_iter)
+  1083208    0.094    0.000    0.094    0.000 networkx/algorithms/cluster.py:180(<genexpr>)
+    99508    0.062    0.000    0.156    0.000 {built-in method builtins.sum}
+        1    0.000    0.000    0.996    0.996 networkx/algorithms/cluster.py:384(clustering)
+     3000    0.000    0.000    0.000    0.000 {built-in method builtins.len}
+     1001    0.000    0.000    0.000    0.000 networkx/algorithms/cluster.py:170(<genexpr>)
+        1    0.000    0.000    0.996    0.996 {built-in method builtins.eval}
+        1    0.000    0.000    0.000    0.000 {method 'disable' of '_lsprof.Profiler' objects}
+        1    0.000    0.000    0.996    0.996 networkx/utils/backends.py:541(_call_if_no_backends_installed)
+        1    0.000    0.000    0.996    0.996 <class 'networkx.utils.decorators.argmap'> compilation 21:1(argmap_clustering_18)
+        1    0.000    0.000    0.996    0.996 <string>:1(<module>)
+        1    0.000    0.000    0.000    0.000 <class 'networkx.utils.decorators.argmap'> compilation 25:1(argmap__directed_triangles_and_degree_iter_22)
+        1    0.000    0.000    0.000    0.000 networkx/classes/graph.py:2012(nbunch_iter)
+        1    0.000    0.000    0.000    0.000 networkx/utils/decorators.py:83(_not_implemented_for)
+
+

@@ -1,8 +1,13 @@
 """Command line entry point.
 
 Local commands, which never touch Sail: ``status``.
-Commands that create boxes or call the model: ``run``, ``measure``.
+Commands that create boxes or call the model: ``run``, ``measure``, ``check``.
 Control box commands: ``deploy``, ``launch``, ``remote-status``, ``fetch``.
+
+``check`` is how a target is admitted: one referee box, no patch, no model.
+It surveys the base tree and judges it against the rules in
+``referee/admissibility.py``. A run refuses a config with uncalibrated
+inputs, so the order for a new target is check, calibrate, run.
 
 Every command is a function taking parsed arguments, so the wiring is testable
 without a subprocess.
@@ -48,7 +53,23 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _refuse_uncalibrated(cfg: RunConfig, what: str) -> int:
+    """Non zero if any input has no noise floor, with the inputs named."""
+    if not cfg.target.uncalibrated:
+        return 0
+    print(
+        f"cannot {what}: no noise floor for {', '.join(cfg.target.uncalibrated)}. "
+        "Run calibrate.py on this config first and paste the floors in.",
+        file=sys.stderr,
+    )
+    return 2
+
+
 def cmd_run(args: argparse.Namespace) -> int:
+    cfg = _load(args.config)
+    if rc := _refuse_uncalibrated(cfg, "run"):
+        return rc
+
     from autoresearch import observe
     from autoresearch.boxes.sail_box import SailBoxFactory
     from autoresearch.model.sail_model import SailChatModel
@@ -57,7 +78,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     from autoresearch.worker.agent_loop import AgentLoopWorker
 
     env.load_dotenv()
-    cfg = _load(args.config)
     root = Path(args.repo_root).resolve()
     run_dir = Path(args.runs_root) / cfg.run_id if args.runs_root else cfg.run_dir
     docs = profile_docs_from_repo(root, cfg)
@@ -72,11 +92,14 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_measure(args: argparse.Namespace) -> int:
     """Phase 2b check 1: measure hand written patches on one real referee box."""
+    cfg = _load(args.config)
+    if rc := _refuse_uncalibrated(cfg, "measure"):
+        return rc
+
     from autoresearch.boxes.sail_box import SailBoxFactory
     from autoresearch.referee.referee import Referee
 
     env.load_dotenv()
-    cfg = _load(args.config)
     boxes = SailBoxFactory(cfg)
     ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     box = boxes.create(name=f"measure-{ts}", role="referee")
@@ -95,10 +118,16 @@ def cmd_measure(args: argparse.Namespace) -> int:
             tests = (
                 ", ".join(f"{t.scope} {'pass' if t.ok else 'FAIL'}" for t in m.tests) or "not run"
             )
+            per_input = ", ".join(
+                f"{i.name} {'--' if i.speedup is None else format(i.speedup, '.3f')}"
+                for i in m.inputs
+            )
             print(
                 f"  applied {m.applied}; tests {tests}; result matches {m.result_matches}; "
-                f"median {m.speedup}; clears noise {m.clears_noise}; "
-                f"errors {list(m.errors)}; {m.wall_s:.0f}s",
+                f"geomean {m.speedup}; worst {m.worst_speedup}; "
+                f"slower on {list(m.regressions) or 'nothing'}; clears noise {m.clears_noise}; "
+                f"errors {list(m.errors)}; {m.wall_s:.0f}s\n"
+                f"  per input: {per_input or 'none timed'}",
                 flush=True,
             )
             if ref.broken:
@@ -111,6 +140,47 @@ def cmd_measure(args: argparse.Namespace) -> int:
             print("box terminated", flush=True)
     print(f"wrote {out_dir / f'{ts}.json'}")
     return 0
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    """Survey a target on one referee box and judge it against the admissibility rules."""
+    from autoresearch.boxes.sail_box import SailBoxFactory
+    from autoresearch.referee import admissibility
+    from autoresearch.referee.referee import Referee
+
+    env.load_dotenv()
+    cfg = _load(args.config)
+    boxes = SailBoxFactory(cfg)
+    ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    box = boxes.create(name=f"check-{ts}", role="referee")
+    print(f"referee box {box.name} ({box.box_id})", flush=True)
+    try:
+        ref = Referee(box, cfg)
+        ref.setup()
+        survey = ref.survey()
+        if ref.broken:
+            print(f"referee marked broken: {ref.broken}", file=sys.stderr)
+    finally:
+        if not args.keep:
+            box.terminate()
+            print("box terminated", flush=True)
+    verdicts = admissibility.judge(cfg.target, survey, cfg.referee.repeats_per_launch)
+    print(admissibility.render(cfg.target, survey, verdicts))
+    out_dir = Path(args.out) / "check"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    record = {
+        "config": args.config,
+        "sha": cfg.target.sha,
+        "box_id": box.box_id,
+        "at": ts,
+        "inputs": [i.__dict__ for i in survey.inputs],
+        "tests": [t.to_dict() for t in survey.tests],
+        "errors": list(survey.errors),
+        "verdicts": [v.__dict__ for v in verdicts],
+    }
+    (out_dir / f"{ts}.json").write_text(json.dumps(record, indent=2) + "\n")
+    print(f"\nrecord: {out_dir / f'{ts}.json'}")
+    return 1 if any(v.failed for v in verdicts) else 0
 
 
 # ----- parser ------------------------------------------------------------------------
@@ -138,6 +208,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out", default="runs", help="where the report is written")
     p.add_argument("--keep", action="store_true", help="leave the box running")
     p.set_defaults(func=cmd_measure)
+
+    p = sub.add_parser(
+        "check", help="survey a target on one referee box and judge whether it can be measured"
+    )
+    p.add_argument("config")
+    p.add_argument("--out", default="runs", help="where the report is written")
+    p.add_argument("--keep", action="store_true", help="leave the box running")
+    p.set_defaults(func=cmd_check)
 
     try:
         from autoresearch.control import commands as control

@@ -1,4 +1,5 @@
-"""The noise floor in configs/t1_w1.toml is derived, not typed. These tests keep it so."""
+"""The primary input's noise floor in the networkx configs is derived, not typed.
+These tests keep it so."""
 
 import json
 from pathlib import Path
@@ -41,9 +42,11 @@ def test_pilot_noise_floor_is_reproduced_from_the_null_data() -> None:
 
 
 def test_config_noise_floor_equals_the_derived_constant() -> None:
-    cfg = load_config(ROOT / "configs" / "t1_w1.toml")
+    """Measurement C's floor was derived on the dense graph, which is the
+    primary input. The other inputs carry their own, calibrated separately."""
+    cfg = load_config(ROOT / "configs" / "t1_w4d.toml")
     assert cfg.referee.pairs == PILOT_PAIRS
-    assert cfg.referee.noise_floor == PILOT_NOISE_FLOOR
+    assert cfg.target.primary.noise_floor == PILOT_NOISE_FLOOR
 
 
 @pytest.mark.parametrize(

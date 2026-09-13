@@ -188,7 +188,12 @@ def next_attempt_number(paths: RunPaths) -> int:
 
 
 def best_ratio(history: tuple[Attempt, ...]) -> tuple[float | None, int | None]:
-    """The best median ratio among attempts that clear the noise floor, and which attempt."""
+    """The best speedup among attempts that clear the noise floor, and which attempt.
+
+    The speedup is the geometric mean over the target's inputs, and clearing the
+    floor already requires that no input got slower, so this cannot select a
+    patch that traded one input for another.
+    """
     best: float | None = None
     which: int | None = None
     for a in history:

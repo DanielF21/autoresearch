@@ -13,6 +13,7 @@ from autoresearch.model.protocol import ModelError
 from autoresearch.types import Attempt as HistoryAttempt
 from autoresearch.types import (
     AttemptRef,
+    InputTiming,
     Measurement,
     Prediction,
     StopReason,
@@ -29,13 +30,13 @@ DIFF = "diff --git a/networkx/algorithms/cluster.py b/networkx/algorithms/cluste
 
 @pytest.fixture
 def config() -> RunConfig:
-    return load_config(ROOT / "configs" / "t1_w1.toml")
+    return load_config(ROOT / "configs" / "t1_w4d.toml")
 
 
 def prepare(box: FakeBox, role: str) -> None:
     """A worker box whose setup succeeds and whose git diff returns DIFF."""
     assert role == "worker"
-    box.on("git checkout -q --detach", ok(f"{BASE_SHA}\n"))
+    box.on("git checkout -q --detach", ok(f"{BASE_SHA}\npython 3.12.4\n"))
     box.on("git add -N", ok(DIFF))
     box.on("cat -n", ok("     1\tdef f(): pass\n"))
     box.on(
@@ -110,8 +111,14 @@ def test_happy_path_submits_a_diff(config: RunConfig) -> None:
 
     first = model.requests[0]
     assert first[0]["role"] == "system"
+    # The Python version is what the box printed, not a number written into the prompt.
+    assert "Python 3.12.4" in first[0]["content"]
     assert "cluster.py:160 82% self time" in first[1]["content"]
     assert "attempt 0001" in first[1]["content"]
+    # The target is described from the config: package, alias, and each input's setup.
+    assert "Package: `networkx`" in first[1]["content"] and "bound to `nx`" in first[1]["content"]
+    assert "G = nx.gn_graph(800, seed=3)" in first[1]["content"]
+    assert "graph\n" not in first[1]["content"]
     last = model.requests[-1]
     assert last[2]["role"] == "assistant" and last[2].get("reasoning_content") == "thinking"
     assert last[3]["role"] == "tool"
@@ -131,15 +138,20 @@ def test_history_is_rendered_and_uploaded(config: RunConfig) -> None:
         usage=Usage(),
         wall_s=10.0,
         measurement=Measurement(
-            noise_floor=1.0106,
             applied=True,
             tests=(
                 SuiteResult("module", 5, 0, 0, 1, True),
                 SuiteResult("full", 9, 1, 0, 60, False),
             ),
-            base_fp="a",
-            patched_fp="a",
-            speedup=1.002,
+            inputs=(
+                InputTiming(
+                    name="er1000_005",
+                    noise_floor=1.0106,
+                    base_fp="a",
+                    patched_fp="a",
+                    speedup=1.002,
+                ),
+            ),
         ),
     )
     boxes: list[FakeBox] = []
@@ -157,7 +169,7 @@ def test_history_is_rendered_and_uploaded(config: RunConfig) -> None:
 
     # The prompt carries an index: what was tried, what it scored, what happened.
     assert "1 earlier attempt, 0 real speedups" in content
-    assert "0001     1.00x" in content and "tests failed" in content
+    assert "0001     1.00x     1.00x  tests failed" in content
     assert "attempt 0002" in content
 
     # It does not carry the attempts themselves. Rendering every diff into every
@@ -176,7 +188,7 @@ def test_history_is_rendered_and_uploaded(config: RunConfig) -> None:
 
 
 def test_max_turns_cap_collects_the_diff_so_far(config: RunConfig) -> None:
-    cfg = load_config(ROOT / "configs" / "t1_w1.toml")
+    cfg = load_config(ROOT / "configs" / "t1_w4d.toml")
     from dataclasses import replace
 
     cfg = replace(cfg, worker=replace(cfg.worker, max_turns=2))
@@ -249,6 +261,18 @@ def test_wrong_head_is_a_box_error(config: RunConfig) -> None:
     out = AgentLoopWorker(FakeChatModel(script=[]), factory, config).attempt(make_input(config))
     assert out.stop_reason == StopReason.BOX_ERROR
     assert "not the base" in out.error
+
+
+def test_a_box_that_does_not_report_its_python_is_a_box_error(config: RunConfig) -> None:
+    """The prompt states the version; a guess would be the old hardcoded number back."""
+
+    def silent(box: FakeBox, role: str) -> None:
+        box.on("git checkout -q --detach", ok(f"{BASE_SHA}\n"))
+
+    factory = FakeBoxFactory(prepare=silent)
+    out = AgentLoopWorker(FakeChatModel(script=[]), factory, config).attempt(make_input(config))
+    assert out.stop_reason == StopReason.BOX_ERROR
+    assert "Python version" in out.error
 
 
 def test_unknown_tool_is_answered_and_the_loop_continues(config: RunConfig) -> None:
