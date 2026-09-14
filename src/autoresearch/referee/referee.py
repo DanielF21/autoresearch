@@ -90,6 +90,7 @@ class _Launch:
     fixed_s: float | None
     first_s: float | None = None  # the first call; None from a guest that predates it
     warm_s: float | None = None  # the best of the calls after the first
+    result_fp: str = ""  # what the timed calls returned, held against the verified result
 
 
 @dataclass(frozen=True)
@@ -221,10 +222,9 @@ class _InputFacts:
 
     @property
     def verified(self) -> bool:
-        """Both trees ran both instances, so the input can be timed."""
-        return bool(
-            self.base_fp and self.patched_fp and self.held_out_base_fp and self.held_out_patched_fp
-        )
+        """Both trees ran the shown instance, so the input can be timed. The held
+        out instance is verified after it is timed; see ``_time_input``."""
+        return bool(self.base_fp and self.patched_fp)
 
     def finish(self) -> InputTiming:
         return InputTiming(
@@ -380,7 +380,7 @@ class Referee:
             # rather than bind it, which is correct only because _step calls it
             # at once. Binding here does not depend on that.
             for inp in timeable:
-                self._step(facts, f"timing {inp.spec.name}", partial(self._time_input, inp))
+                self._step(facts, f"timing {inp.spec.name}", partial(self._time_input, facts, inp))
             return facts.finish(time.perf_counter() - t0)
         finally:
             self._cleanup()
@@ -424,7 +424,9 @@ class Referee:
             for _ in range(rounds):
                 seed = self._draw_seed()
                 for spec in specs:
-                    out[spec.name].extend(self._time_pairs(spec, seed))
+                    out[spec.name].extend(
+                        self._time_pairs(spec, seed, {"base": set(), "patched": set()})
+                    )
                     if progress is not None:
                         progress(spec.name, len(out[spec.name]))
         finally:
@@ -523,43 +525,82 @@ class Referee:
         )
 
     def _verify_input(self, facts: _Facts, inp: _InputFacts) -> None:
-        """One verify call per tree per instance. A failure on any leaves this input untimed.
+        """One verify call per tree on the shown instance. A failure leaves this input untimed.
 
-        The held out instance is verified as well as timed: a patch that
-        computes the right answer on the instance it was shown and the wrong
-        one on the instance it was not has computed the wrong thing.
+        Only the shown instance is verified here. The held out instance is
+        verified after it has been timed, in ``_time_input``, so that its first
+        timing launch is the first time the patched tree ever sees it.
         """
         name = inp.spec.name
         plan = (
-            ("base_fp", BASE_TREE, SHOWN_SEED, f"verify base {name}"),
-            ("patched_fp", PATCHED_TREE, SHOWN_SEED, f"verify patched {name}"),
-            ("held_out_base_fp", BASE_TREE, inp.seed, f"verify base {name} at seed {inp.seed}"),
-            (
-                "held_out_patched_fp",
-                PATCHED_TREE,
-                inp.seed,
-                f"verify patched {name} at seed {inp.seed}",
-            ),
+            ("base_fp", BASE_TREE, f"verify base {name}"),
+            ("patched_fp", PATCHED_TREE, f"verify patched {name}"),
         )
-        for attr, tree, seed, label in plan:
+        for attr, tree, label in plan:
             ok = self._step(
                 facts,
                 label,
                 # Bound by partial, not closed over: _step runs it at once, but a
                 # closure over the loop variables would be wrong if it did not.
-                partial(self._verify_into, inp, attr, tree, seed),
+                partial(self._verify_into, inp, attr, tree, SHOWN_SEED),
             )
             if not ok and tree == PATCHED_TREE:
-                inp.errors.append(
-                    "timing skipped: patched tree cannot run this input"
-                    + ("" if seed == SHOWN_SEED else f" at seed {seed}")
-                )
+                inp.errors.append("timing skipped: patched tree cannot run this input")
+
+    def _verify_held_out(self, facts: _Facts, inp: _InputFacts) -> bool:
+        """Verify both trees on the held out instance, after it was timed.
+
+        A patch that computes the right answer on the instance it was shown and
+        the wrong one on the instance it was not has computed the wrong thing.
+        """
+        name = inp.spec.name
+        plan = (
+            ("held_out_base_fp", BASE_TREE, f"verify base {name} at seed {inp.seed}"),
+            ("held_out_patched_fp", PATCHED_TREE, f"verify patched {name} at seed {inp.seed}"),
+        )
+        ok = True
+        for attr, tree, label in plan:
+            ok = (
+                self._step(facts, label, partial(self._verify_into, inp, attr, tree, inp.seed))
+                and ok
+            )
+        return ok
 
     def _verify_into(self, inp: _InputFacts, attr: str, tree: str, seed: int) -> None:
         setattr(inp, attr, self._verify(tree, inp.spec, seed))
 
-    def _time_input(self, inp: _InputFacts) -> None:
-        """Six pairs on the held out instance, then six on the shown one.
+    @staticmethod
+    def _timed_results_match(
+        inp: _InputFacts, timed: dict[str, set[str]], seed: int, base_fp: str, patched_fp: str
+    ) -> bool:
+        """Whether every timing launch returned what the verify launch returned.
+
+        The guest is launched with ``--verify`` for the result and without it for
+        the clock, and a patch can read its own command line. One that computes
+        the answer only when it is checked, and returns anything at once when it
+        is timed, has not computed anything in the timed region.
+        """
+        for tree, expected in (("base", base_fp), ("patched", patched_fp)):
+            strange = sorted(timed.get(tree, set()) - {expected})
+            if strange:
+                inp.errors.append(
+                    f"the {tree} tree returned a different result when timed than when verified"
+                    f" at seed {seed}; a patch that answers differently when it is not checked"
+                    " has not computed the answer, so this attempt cannot clear the noise floor"
+                )
+                return False
+        return True
+
+    def _time_input(self, facts: _Facts, inp: _InputFacts) -> None:
+        """Six pairs on the held out instance, then its verify, then six pairs on the shown one.
+
+        The held out instance is timed before it is verified, so the first timing
+        launch of the patched tree is the first time it sees that instance: a
+        result written to disk during a verify launch would otherwise be read
+        back by every timing launch, first call included, and neither the
+        memoized nor the overfit test would see it. Timed first, a disk cache
+        shows as the first launch paying and the later ones not, which
+        ``timing.persisted`` reads.
 
         Each pass is retried up to ``timing_retries`` times if too few pairs came
         back clean, and each retry replaces the pass before it rather than adding
@@ -572,10 +613,18 @@ class Referee:
         ratio far above the held out one is a patch that recognised its input.
         """
         cfg = self._config.referee
-        pairs, retries = self._pairs_with_retries(inp.spec, inp.seed)
+        timed: dict[str, set[str]] = {"base": set(), "patched": set()}
+        pairs, retries = self._pairs_with_retries(inp.spec, inp.seed, timed)
         inp.retries = retries
         inp.retried = retries > 0
         inp.pairs = pairs
+        if not self._verify_held_out(facts, inp):
+            inp.errors.append(f"untimed: the patched tree cannot run this input at seed {inp.seed}")
+            return
+        if not self._timed_results_match(
+            inp, timed, inp.seed, inp.held_out_base_fp, inp.held_out_patched_fp
+        ):
+            return
         if not timing.enough_clean(pairs, cfg.min_clean_pairs):
             inp.errors.append(
                 f"only {len(timing.clean_pairs(pairs))} clean pairs of {cfg.pairs} after "
@@ -590,10 +639,22 @@ class Referee:
                 f"{timing.MEMO_FACTOR:.0f}x faster than the first, and not on the base tree; "
                 "a result cache is not a speedup, so this attempt cannot clear the noise floor"
             )
-        shown, shown_retries = self._pairs_with_retries(inp.spec, SHOWN_SEED)
+        elif timing.persisted(pairs):
+            inp.memoized = True
+            inp.errors.append(
+                "memoized: on the patched tree the first call of every launch after the first "
+                f"ran more than {timing.MEMO_FACTOR:.0f}x faster than the first launch's, and not "
+                "on the base tree; a result kept on disk between launches is not a speedup, so "
+                "this attempt cannot clear the noise floor"
+            )
+        timed = {"base": set(), "patched": set()}
+        shown, shown_retries = self._pairs_with_retries(inp.spec, SHOWN_SEED, timed)
         inp.retries += shown_retries
         inp.retried = inp.retries > 0
         inp.shown_pairs = shown
+        if not self._timed_results_match(inp, timed, SHOWN_SEED, inp.base_fp, inp.patched_fp):
+            inp.speedup = None
+            return
         if not timing.enough_clean(shown, cfg.min_clean_pairs):
             inp.errors.append(
                 f"shown instance: only {len(timing.clean_pairs(shown))} clean pairs of "
@@ -610,14 +671,14 @@ class Referee:
             )
 
     def _pairs_with_retries(
-        self, spec: BenchmarkInput, seed: int
+        self, spec: BenchmarkInput, seed: int, timed: dict[str, set[str]]
     ) -> tuple[tuple[PairTiming, ...], int]:
         cfg = self._config.referee
         retries = 0
-        pairs = self._time_pairs(spec, seed)
+        pairs = self._time_pairs(spec, seed, timed)
         while not timing.enough_clean(pairs, cfg.min_clean_pairs) and retries < cfg.timing_retries:
             retries += 1
-            pairs = self._time_pairs(spec, seed)
+            pairs = self._time_pairs(spec, seed, timed)
         return pairs, retries
 
     def _step(self, facts: _Facts, name: str, run: Any) -> bool:
@@ -740,6 +801,7 @@ class Referee:
         reasons: list[str] = []
         for s in rec.get("samples", []):
             reasons.extend(s.get("reasons", []))
+        result_fp = str(rec.get("result_fp") or "")
         if clean is None:
             return _Launch(
                 float(rec.get("min_all")),
@@ -748,13 +810,17 @@ class Referee:
                 fixed_s,
                 first_s,
                 warm_s,
+                result_fp,
             )
-        return _Launch(float(clean), False, (), fixed_s, first_s, warm_s)
+        return _Launch(float(clean), False, (), fixed_s, first_s, warm_s, result_fp)
 
-    def _time_pairs(self, spec: BenchmarkInput, seed: int) -> tuple[PairTiming, ...]:
+    def _time_pairs(
+        self, spec: BenchmarkInput, seed: int, timed: dict[str, set[str]]
+    ) -> tuple[PairTiming, ...]:
         """One input's pairs on one instance. The two launches of a pair are back
         to back so machine drift affects both and cancels, which is why every
-        input gets its own pairs rather than sharing a launch."""
+        input gets its own pairs rather than sharing a launch. ``timed`` collects
+        what each tree's timed calls returned, for ``_timed_results_match``."""
         cfg = self._config.referee
         out: list[PairTiming] = []
         for plan in timing.plan_pairs(cfg.pairs, cfg.hash_seeds):
@@ -765,6 +831,7 @@ class Referee:
                 tree = BASE_TREE if which == "base" else PATCHED_TREE
                 launch = self._launch(tree, spec, plan.hash_seed, seed)
                 launches[which] = launch
+                timed[which].add(launch.result_fp)
                 contaminated = contaminated or launch.contaminated
                 reasons = tuple(sorted(set(reasons) | set(launch.reasons)))
             out.append(

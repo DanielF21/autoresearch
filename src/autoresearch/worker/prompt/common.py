@@ -59,6 +59,12 @@ How the run works:
 - A real speedup passes both suites, computes the same result on every input,
   is not slower on any input, and clears the noise floor on at least one. Its
   recorded number is the geometric mean across the inputs.
+- The goal is a library that is faster on any valid input, not on these. The
+  benchmark inputs and the tests are guidance about where the time goes and
+  what must keep working; they are not the thing to satisfy. A change that is
+  fast only on what it has seen, or that gets its speed from anything other
+  than doing the library's work in less time, is worth nothing here, will be
+  scored as nothing, and would be rejected by any maintainer who read it.
 - Only source files may change. A patch that edits tests or benchmarks is
   measured but marked out of scope and cannot count.
 - When you submit, the harness takes git diff of your working tree as the

@@ -97,6 +97,22 @@ def test_time_target_run_mode(fake_tree: Path) -> None:
     assert out["fixed_s"] is None or float(str(out["fixed_s"])) > 0
 
 
+def test_time_target_keeps_its_own_clock(fake_tree: Path) -> None:
+    """The package under test shares the process with the stopwatch. A patch
+    that replaces time.perf_counter after import must not shrink a sample."""
+    frozen = "import time; time.perf_counter = lambda: 0.0; items = fp.make(500)"
+    out = _run(
+        "time_target.py",
+        *_target(fake_tree, **{"--setup": frozen}),
+        "--repeats",
+        "3",
+        "--no-counters",
+    )
+    assert out["_rc"] == 0
+    assert float(str(out["min_all"])) > 0 and float(str(out["first_s"])) > 0
+    assert float(str(out["setup_s"])) >= 0
+
+
 def test_time_target_verify_mode_sees_the_hot_file(fake_tree: Path) -> None:
     out = _run("time_target.py", *_target(fake_tree), "--verify")
     assert out["kind"] == "verify"

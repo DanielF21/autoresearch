@@ -437,6 +437,52 @@ def test_a_patch_that_recognises_the_shown_instance_is_overfit_not_a_speedup(
     assert m.to_dict()["overfit"] == ["er1000_005", "gn800"]
 
 
+def test_the_held_out_instance_is_timed_before_it_is_verified(config: RunConfig) -> None:
+    """A result written to disk during a verify launch would be read back by
+    every timing launch, first call included. Timed first, the patched tree's
+    first timing launch is the first time it sees the instance."""
+    box = make_box()
+    ref = Referee(box, config, draw_seed=lambda: 4242)
+    ref.setup()
+    m = ref.measure(PRECOMPUTE)
+    assert m.clears_noise
+    first = config.target.inputs[0]
+    mine = [c for c in box.commands if "time_target.py" in c and first.setup in c]
+    kinds = [("verify" if "--verify" in c else "time", arg(c, "--seed")) for c in mine]
+    assert kinds[:2] == [("verify", "0"), ("verify", "0")]
+    held = [k for k in kinds if k[1] == "4242"]
+    assert held[:12] == [("time", "4242")] * 12 and held[12:] == [("verify", "4242")] * 2
+    assert kinds.index(("time", "0")) > kinds.index(("verify", "4242"))
+
+
+def test_a_patch_that_answers_differently_when_timed_is_not_scored(config: RunConfig) -> None:
+    """The guest is launched with --verify for the result and without it for the
+    clock, and a patch can read its own command line."""
+    box = make_box(speedup=3000.0, timing_cheat=("er1000_005", "gn800"))
+    ref = Referee(box, config)
+    ref.setup()
+    m = ref.measure(PRECOMPUTE)
+    assert m.tests_pass and m.result_matches is True
+    cheat, honest = _first(m, "er1000_005"), _first(m, "er1000_001")
+    assert cheat.speedup is None and cheat.pairs
+    assert any("when timed than when verified" in e for e in cheat.errors)
+    assert honest.speedup == pytest.approx(3000.0)
+    assert not m.clears_noise
+
+
+def test_a_result_kept_on_disk_between_launches_is_memoized_not_a_speedup(
+    config: RunConfig,
+) -> None:
+    box = make_box(speedup=2000.0, persisted_inputs=("er1000_005",))
+    ref = Referee(box, config)
+    ref.setup()
+    m = ref.measure(PRECOMPUTE)
+    assert m.memoized == ("er1000_005",) and not m.clears_noise
+    kept = _first(m, "er1000_005")
+    assert kept.memoized and any("between launches" in e for e in kept.errors)
+    assert not _first(m, "er1000_001").memoized
+
+
 def test_a_patch_wrong_on_the_held_out_instance_computed_the_wrong_thing(
     config: RunConfig,
 ) -> None:

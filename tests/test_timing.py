@@ -83,6 +83,44 @@ def test_memoized_reads_the_first_call_gap_on_the_patched_tree_only() -> None:
     assert not memoized(())
 
 
+def test_persisted_reads_the_first_launch_against_the_later_ones_on_the_patched_tree() -> None:
+    from autoresearch.referee.timing import MEMO_FACTOR, persisted
+
+    def pair(
+        i: int, base_first: float, patched_first: float, contaminated: bool = False
+    ) -> PairTiming:
+        return PairTiming(
+            i,
+            BASE_FIRST,
+            0,
+            1.0,
+            0.001,
+            contaminated,
+            base_first_s=base_first,
+            base_warm_s=1.0,
+            patched_first_s=patched_first,
+            patched_warm_s=0.001,
+        )
+
+    # The disk cache: the first launch pays the base's first call, the rest nothing.
+    kept = (pair(0, 1.0, 1.0), *(pair(i, 1.0, 0.001) for i in range(1, 6)))
+    assert persisted(kept)
+    # An honest patch: every launch's first call costs the same.
+    assert not persisted(tuple(pair(i, 1.0, 0.5) for i in range(6)))
+    # Launch to launch scatter on both trees is not a cache.
+    both = (pair(0, 2.0, 2.0), *(pair(i, 1.0, 1.0) for i in range(1, 6)))
+    assert not persisted(both)
+    # The threshold is relative to the base's own first launch gap as well as absolute.
+    relative = (pair(0, 3.0, MEMO_FACTOR + 1), *(pair(i, 1.0, 1.0) for i in range(1, 6)))
+    assert not persisted(relative)
+    # Fewer than three clean pairs, or no numbers, never flag.
+    assert not persisted(kept[:2])
+    assert not persisted(
+        tuple(pair(i, 1.0, 0.001 if i else 1.0, contaminated=True) for i in range(6))
+    )
+    assert not persisted((PairTiming(0, BASE_FIRST, 0, 1.0, 0.001, False),) * 3)
+
+
 def test_overfit_compares_the_shown_instance_against_the_held_out_one() -> None:
     from autoresearch.referee.timing import OVERFIT_FACTOR, overfit
 

@@ -66,6 +66,8 @@ def referee_box(
     overfit_inputs: tuple[str, ...] = (),
     seed_blind: tuple[str, ...] = (),
     held_out_wrong: tuple[str, ...] = (),
+    timing_cheat: tuple[str, ...] = (),
+    persisted_inputs: tuple[str, ...] = (),
     contaminate_pairs: bool | int = False,
     cleanup_ok: bool = True,
 ) -> FakeBox:
@@ -87,10 +89,16 @@ def referee_box(
     ``overfit_inputs`` input is ``speedup`` times faster at seed 0 only and
     unchanged elsewhere: a patch that recognised its input. A ``held_out_wrong``
     input's patched tree fingerprints differently from the base at any seed
-    but 0: right on the instance it saw, wrong on the one it did not.
+    but 0: right on the instance it saw, wrong on the one it did not. A
+    ``timing_cheat`` input's patched tree returns the verified result when
+    launched with ``--verify`` and something else when timed. A
+    ``persisted_inputs`` input's patched tree pays the base's first call on its
+    first timing launch only, and nothing on any launch after: a result kept on
+    disk between processes.
     """
     box = box if box is not None else FakeBox()
     timing_launches: dict[str, int] = {}
+    patched_launches: dict[str, int] = {}
     # A verify launch names its input only by its setup text; the test config's
     # inputs are the ones this box can name. Any other input is nameless here,
     # so the per input verify behaviours above do not apply to it.
@@ -196,6 +204,13 @@ def referee_box(
         tainted = (
             contaminate_pairs if isinstance(contaminate_pairs, bool) else launch < contaminate_pairs
         )
+        # The timed calls return what the verify launch returned, unless the
+        # patched tree cheats when it is not checked.
+        wrong = (not fp_match or (name in held_out_wrong and seed != 0)) and patched
+        instance = "" if name in seed_blind else f"_{seed}"
+        fp = ("fp_other" if wrong else "fp_same") + instance
+        if patched and name in timing_cheat:
+            fp = "fp_garbage"
         if tainted:
             samples = [{"t": t, "contaminated": True, "reasons": ["steal"]}]
             return ok(
@@ -206,12 +221,19 @@ def referee_box(
                         "min_all": t,
                         "samples": samples,
                         "fixed_s": fixed,
+                        "result_fp": fp,
                     }
                 )
             )
         # A memoized input: the patched tree's first call costs what the base's
         # does, and every call after it returns the cached answer at once.
         first = 1.0 if (patched and name in memoized_inputs) else t
+        # A persisted input: only the patched tree's first launch pays.
+        if patched:
+            nth = patched_launches.get(name, 0)
+            patched_launches[name] = nth + 1
+            if name in persisted_inputs and nth == 0:
+                first = 1.0
         return ok(
             json.dumps(
                 {
@@ -222,6 +244,7 @@ def referee_box(
                     "fixed_s": fixed,
                     "first_s": first,
                     "warm_s": t,
+                    "result_fp": fp,
                 }
             )
         )

@@ -113,6 +113,40 @@ def memoized(pairs: tuple[PairTiming, ...], factor: float = MEMO_FACTOR) -> bool
     return gap > factor and gap > factor * statistics.median(base)
 
 
+def persisted(pairs: tuple[PairTiming, ...], factor: float = MEMO_FACTOR) -> bool:
+    """Whether the patched tree's first call collapses from its first launch to the later ones.
+
+    ``memoized`` sees a cache that lives in the process: the first call pays and
+    the rest do not. A cache written to disk survives the process, so every call
+    of every launch after the first is near free, the first call included, and
+    ``memoized`` sees nothing. What it cannot hide is the first launch, which had
+    nothing to read: its first call costs what the base's does. So the test is the
+    first clean pair's patched first call over the median of the later pairs'
+    patched first calls, held against the same ratio on the base tree, which ran
+    in the same order and is the ordinary launch to launch scatter. Needs three
+    clean pairs with the numbers; with fewer, False.
+    """
+    clean = [
+        p
+        for p in clean_pairs(pairs)
+        if None not in (p.base_first_s, p.patched_first_s)
+        and p.base_first_s is not None
+        and p.patched_first_s is not None
+        and p.base_first_s > 0
+        and p.patched_first_s > 0
+    ]
+    if len(clean) < 3:
+        return False
+    head, rest = clean[0], clean[1:]
+    assert head.patched_first_s is not None and head.base_first_s is not None
+    later_patched = statistics.median(float(p.patched_first_s or 0.0) for p in rest)
+    later_base = statistics.median(float(p.base_first_s or 0.0) for p in rest)
+    if later_patched <= 0 or later_base <= 0:
+        return False
+    gap = head.patched_first_s / later_patched
+    return gap > factor and gap > factor * (head.base_first_s / later_base)
+
+
 OVERFIT_FACTOR = 2.0
 
 

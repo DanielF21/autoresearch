@@ -241,9 +241,13 @@ def main() -> int:
     pyc_fresh = _pyc_fresh(hot) if hot.exists() else False
 
     sys.path.insert(0, str((root / args.package_root).resolve()))
-    t0 = time.perf_counter()
+    # The clock is bound here, before the package under test is imported, and
+    # held in a local: a patch that replaces time.perf_counter at import, or
+    # reaches into this module through sys.modules, does not reach this one.
+    now = time.perf_counter
+    t0 = now()
     module = importlib.import_module(args.package)
-    import_s = time.perf_counter() - t0
+    import_s = now() - t0
     package_file = pathlib.Path(str(module.__file__)).resolve()
     if root not in package_file.parents:
         return _fail(
@@ -256,9 +260,9 @@ def main() -> int:
         return {args.alias: module, "ROOT": root, "SEED": args.seed}
 
     scope = fresh_scope()
-    t0 = time.perf_counter()
+    t0 = now()
     exec(args.setup, scope)
-    setup_s = time.perf_counter() - t0
+    setup_s = now() - t0
 
     base: dict[str, Any] = {
         "label": args.label,
@@ -287,7 +291,7 @@ def main() -> int:
 
         base["fixed_s"] = process_age_s()
         profiler = cProfile.Profile()
-        t0 = time.perf_counter()
+        t0 = now()
         profiler.enable()
         try:
             result = eval(args.call, scope)
@@ -296,7 +300,7 @@ def main() -> int:
             profiler.disable()
             return _fail(error=str(e), **base)
         profiler.disable()
-        call_s = time.perf_counter() - t0
+        call_s = now() - t0
         stats = pstats.Stats(profiler)
         hot_tottime, total_tt, executed = hot_self_time(stats, hot)
         try:
@@ -322,10 +326,10 @@ def main() -> int:
         try:
             for _ in range(PROFILE_PLAIN_RUNS):
                 gc.collect()
-                t0 = time.perf_counter()
+                t0 = now()
                 result = eval(args.call, scope)
                 materialize(result)
-                plain.append(time.perf_counter() - t0)
+                plain.append(now() - t0)
             gc.collect()
             profiler = cProfile.Profile()
             profiler.enable()
@@ -369,16 +373,16 @@ def main() -> int:
             exec(args.setup, scope)
         gc.collect()
         before = prov.counters() if prov is not None else None
-        t0 = time.perf_counter()
+        t0 = now()
         result = eval(args.call, scope)
-        t1 = time.perf_counter()
+        t1 = now()
         # The walk is inside the region: pyparsing_p3_w16 from round 14 returned
         # lazy lists that split their text when first read, after the clock.
         try:
             materialize(result)
         except UnfingerprintableError as e:
             return _fail(error=str(e), **base)
-        t2 = time.perf_counter()
+        t2 = now()
         sample = {"t": t2 - t0, "walk_s": t2 - t1, "contaminated": False, "reasons": []}
         if prov is not None and before is not None:
             d = prov.delta(before, prov.counters())
