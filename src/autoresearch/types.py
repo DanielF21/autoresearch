@@ -144,6 +144,19 @@ class SuiteResult:
     errors: int
     duration_s: float
     ok: bool
+    # The end of pytest's output when the suite did not pass, so the record
+    # names what failed. Empty when it passed, and in records from before it.
+    failures: str = ""
+
+    @property
+    def failed_tests(self) -> tuple[str, ...]:
+        """The test ids pytest listed as FAILED or ERROR, in order, from ``failures``."""
+        out: list[str] = []
+        for line in self.failures.splitlines():
+            head, _, _ = line.partition(" - ")
+            if head.startswith(("FAILED ", "ERROR ")):
+                out.append(head.split(" ", 1)[1].strip())
+        return tuple(out)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -153,6 +166,7 @@ class SuiteResult:
             "errors": self.errors,
             "duration_s": self.duration_s,
             "ok": self.ok,
+            "failures": self.failures,
         }
 
     @classmethod
@@ -164,6 +178,7 @@ class SuiteResult:
             errors=int(d["errors"]),
             duration_s=float(d["duration_s"]),
             ok=bool(d["ok"]),
+            failures=str(d.get("failures", "")),
         )
 
 
@@ -190,6 +205,17 @@ class PairTiming:
     reasons: tuple[str, ...] = ()
     base_fixed_s: float | None = None
     patched_fixed_s: float | None = None
+    # Each launch's first call and the best of the calls after it, kept apart so
+    # a result cache shows: later calls far faster than the first on the patched
+    # tree only. None in records from before the guest reported them.
+    base_first_s: float | None = None
+    patched_first_s: float | None = None
+    base_warm_s: float | None = None
+    patched_warm_s: float | None = None
+    # Which instance of the input both launches built: the setup's SEED. Zero
+    # is the instance the worker is shown, and what every record before the
+    # held out timing carried.
+    seed: int = 0
 
     @property
     def ratio(self) -> float:
@@ -200,6 +226,7 @@ class PairTiming:
             "index": self.index,
             "order": self.order,
             "hash_seed": self.hash_seed,
+            "seed": self.seed,
             "base_s": self.base_s,
             "patched_s": self.patched_s,
             "ratio": self.ratio,
@@ -207,12 +234,18 @@ class PairTiming:
             "reasons": list(self.reasons),
             "base_fixed_s": self.base_fixed_s,
             "patched_fixed_s": self.patched_fixed_s,
+            "base_first_s": self.base_first_s,
+            "patched_first_s": self.patched_first_s,
+            "base_warm_s": self.base_warm_s,
+            "patched_warm_s": self.patched_warm_s,
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> PairTiming:
-        base_fixed = d.get("base_fixed_s")
-        patched_fixed = d.get("patched_fixed_s")
+        def opt(key: str) -> float | None:
+            value = d.get(key)
+            return None if value is None else float(value)
+
         return cls(
             index=int(d["index"]),
             order=str(d["order"]),
@@ -221,8 +254,13 @@ class PairTiming:
             patched_s=float(d["patched_s"]),
             contaminated=bool(d["contaminated"]),
             reasons=tuple(str(r) for r in d.get("reasons", [])),
-            base_fixed_s=None if base_fixed is None else float(base_fixed),
-            patched_fixed_s=None if patched_fixed is None else float(patched_fixed),
+            base_fixed_s=opt("base_fixed_s"),
+            patched_fixed_s=opt("patched_fixed_s"),
+            base_first_s=opt("base_first_s"),
+            patched_first_s=opt("patched_first_s"),
+            base_warm_s=opt("base_warm_s"),
+            patched_warm_s=opt("patched_warm_s"),
+            seed=int(d.get("seed", 0)),
         )
 
 
@@ -240,6 +278,12 @@ class InputTiming:
     noise floor: the mean over the inputs that remain says nothing about the
     input that is missing, and the missing ones are the cheap ones where a
     patch gains least.
+
+    An input is a family of instances, one per ``SEED``. ``pairs`` and
+    ``speedup`` are on the held out instance, ``seed``, which the worker never
+    saw; ``shown_pairs`` and ``shown_speedup`` are on seed 0, the instance it
+    was shown. The score is the held out one. Records from before the held out
+    timing have no shown pairs and a seed of 0, and read as the score they were.
     """
 
     name: str
@@ -251,6 +295,20 @@ class InputTiming:
     retried: bool = False
     errors: tuple[str, ...] = ()
     retries: int = 0
+    # The referee found the patched tree's later calls collapsing against its
+    # first call while the base tree's did not: a result cache, not a speedup.
+    memoized: bool = False
+    # The held out instance timed, and the shown instance's timing beside it.
+    seed: int = 0
+    shown_pairs: tuple[PairTiming, ...] = ()
+    shown_speedup: float | None = None
+    # Both trees' fingerprints on the held out instance. Empty in records from
+    # before it was verified, and then only the shown instance is compared.
+    held_out_base_fp: str = ""
+    held_out_patched_fp: str = ""
+    # The shown instance ran far faster than the held out one: a patch that
+    # recognises the benchmark, not a speedup.
+    overfit: bool = False
 
     @property
     def untimed(self) -> bool:
@@ -258,9 +316,15 @@ class InputTiming:
 
     @property
     def result_matches(self) -> bool | None:
+        """Both trees computed the same thing on the shown instance and, where
+        it was verified, on the held out one too."""
         if not self.base_fp or not self.patched_fp:
             return None
-        return self.base_fp == self.patched_fp
+        if self.base_fp != self.patched_fp:
+            return False
+        if self.held_out_base_fp or self.held_out_patched_fp:
+            return self.held_out_base_fp == self.held_out_patched_fp
+        return True
 
     @property
     def improves(self) -> bool:
@@ -284,12 +348,20 @@ class InputTiming:
             "untimed": self.untimed,
             "retried": self.retried,
             "retries": self.retries,
+            "memoized": self.memoized,
+            "seed": self.seed,
+            "shown_pairs": [p.to_dict() for p in self.shown_pairs],
+            "shown_speedup": self.shown_speedup,
+            "held_out_base_fp": self.held_out_base_fp,
+            "held_out_patched_fp": self.held_out_patched_fp,
+            "overfit": self.overfit,
             "errors": list(self.errors),
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> InputTiming:
         speedup = d.get("speedup")
+        shown = d.get("shown_speedup")
         retried = bool(d.get("retried", False))
         # Records from before the count was kept say only whether a retry happened.
         retries = int(d.get("retries", 1 if retried else 0))
@@ -303,6 +375,13 @@ class InputTiming:
             retried=retried,
             errors=tuple(str(e) for e in d.get("errors", [])),
             retries=retries,
+            memoized=bool(d.get("memoized", False)),
+            seed=int(d.get("seed", 0)),
+            shown_pairs=tuple(PairTiming.from_dict(p) for p in d.get("shown_pairs", [])),
+            shown_speedup=None if shown is None else float(shown),
+            held_out_base_fp=str(d.get("held_out_base_fp", "")),
+            held_out_patched_fp=str(d.get("held_out_patched_fp", "")),
+            overfit=bool(d.get("overfit", False)),
         )
 
 
@@ -400,6 +479,25 @@ class Measurement:
         return tuple(i.name for i in self.inputs if i.regresses)
 
     @property
+    def memoized(self) -> tuple[str, ...]:
+        """Names of inputs where the patch returned a cached result on repeated calls.
+
+        t1_p2_w16 recorded 500x to 6400x from round 5 on by storing the whole
+        answer in the graph's cache dict; the referee times seven calls per
+        launch and took the fastest. Empty is the bar.
+        """
+        return tuple(i.name for i in self.inputs if i.memoized)
+
+    @property
+    def overfit(self) -> tuple[str, ...]:
+        """Names of inputs where the patch was far faster on the shown instance
+        than on the held out one: a patch that recognises the benchmark.
+        pycodestyle_p3_w16 attempts 0233 and 0247 recorded 2985x and 3470x by
+        matching the regenerated inputs by string equality. Empty is the bar.
+        """
+        return tuple(i.name for i in self.inputs if i.overfit)
+
+    @property
     def result_matches(self) -> bool | None:
         """True only if every input computed the same thing on both trees."""
         seen = [i.result_matches for i in self.inputs]
@@ -427,6 +525,8 @@ class Measurement:
             and self.result_matches is True
             and not self.untimed
             and not self.regressions
+            and not self.memoized
+            and not self.overfit
             and any(i.improves for i in self.inputs)
         )
 
@@ -443,6 +543,8 @@ class Measurement:
             "speedup": self.speedup,
             "worst_speedup": self.worst_speedup,
             "regressions": list(self.regressions),
+            "memoized": list(self.memoized),
+            "overfit": list(self.overfit),
             "untimed": list(self.untimed),
             "clears_noise": self.clears_noise,
             "errors": list(self.errors),

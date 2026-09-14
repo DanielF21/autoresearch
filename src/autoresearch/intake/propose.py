@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from autoresearch.config import RunConfig
+from autoresearch.config import SEED_NAME, BenchmarkInput, RunConfig
 from autoresearch.intake.derive import REPO_DIR, Draft
 from autoresearch.intake.render import Proposal, ProposedInput, RenderError, render
 from autoresearch.model.protocol import ChatModel, Message, ToolSpec
@@ -187,13 +187,12 @@ TOOL_SPECS: list[ToolSpec] = [
     *READ_TOOL_SPECS,
     _tool(
         "submit_proposal",
-        "The benchmark: hot file, alias, call, fingerprint (or empty), the hot file's own tests, "
+        "The benchmark: hot file, alias, call, the hot file's own tests, "
         "any extra pip packages setup needs, the input axis and why it matters, and the inputs.",
         {
             "hot_file": {"type": "string"},
             "alias": {"type": "string"},
             "call": {"type": "string"},
-            "fingerprint": {"type": "string"},
             "tests_module": {"type": "string"},
             "extra_pip": {"type": "array", "items": {"type": "string"}},
             "axis": {"type": "string"},
@@ -216,7 +215,6 @@ TOOL_SPECS: list[ToolSpec] = [
             "hot_file",
             "alias",
             "call",
-            "fingerprint",
             "tests_module",
             "extra_pip",
             "axis",
@@ -235,6 +233,26 @@ def _parses(source: str, mode: str) -> str:
     return ""
 
 
+def _not_one_call(call: str) -> str:
+    """Why ``call`` is not a single function call, or empty.
+
+    The result the referee fingerprints has to be what the library computed.
+    The first pycodestyle proposal under the seed rule wrote
+    ``[style.input_file('stdin', lines=source), source_tag]``: a list carrying
+    a per seed tag beside a count that was zero at every seed, so two seeds
+    fingerprinted differently while the library's answer never changed. One
+    call, with no display or operator around it, leaves nothing to smuggle.
+    """
+    node = ast.parse(call, mode="eval").body
+    if isinstance(node, ast.Call):
+        return ""
+    return (
+        "call must be one function call, such as pkg.f(x) or list(pkg.g(x)); a list, tuple, "
+        "dict or expression around it can carry setup values into the result, and the "
+        "result must be what the library computed"
+    )
+
+
 def _text(args: dict[str, Any], key: str, problems: list[str], *, empty: bool = False) -> str:
     value = args.get(key)
     if not isinstance(value, str) or (not empty and not value.strip()):
@@ -251,7 +269,6 @@ def validate(
     hot_file = _text(args, "hot_file", problems)
     alias = _text(args, "alias", problems)
     call = _text(args, "call", problems)
-    fingerprint = _text(args, "fingerprint", problems, empty=True)
     tests_module = _text(args, "tests_module", problems)
     axis = _text(args, "axis", problems)
     axis_reason = _text(args, "axis_reason", problems)
@@ -264,6 +281,9 @@ def validate(
         else:
             if not (p.is_file() and p.suffix == ".py"):
                 problems.append(f"hot_file {hot_file} is not a .py file in the repository")
+            elif draft.single_module:
+                if hot_file != draft.package_dir:
+                    problems.append(f"hot_file must be the single module, {draft.package_dir}")
             elif not hot_file.startswith(f"{draft.package_dir}/"):
                 problems.append(f"hot_file must be inside the package, {draft.package_dir}/")
     if tests_module:
@@ -276,8 +296,8 @@ def validate(
         problems.append("alias must be a Python identifier other than ROOT")
     if call and (err := _parses(call, "eval")):
         problems.append(f"call is not one expression: {err}")
-    if fingerprint and (err := _parses(fingerprint, "eval")):
-        problems.append(f"fingerprint is not one expression: {err}")
+    elif call and (err := _not_one_call(call)):
+        problems.append(err)
 
     extra = args.get("extra_pip")
     if not isinstance(extra, list) or not all(
@@ -308,6 +328,11 @@ def validate(
         seen.add(name)
         if err := _parses(str(fields["setup"]), "exec"):
             problems.append(f"setup of {name} does not parse: {err}")
+        elif not BenchmarkInput(name, str(fields["setup"]), None).seeded:
+            problems.append(
+                f"setup of {name} does not read {SEED_NAME}; the referee times an instance "
+                "the worker was not shown, so every setup must build its input from it"
+            )
         inputs.append(
             ProposedInput(
                 name=name,
@@ -323,7 +348,6 @@ def validate(
         hot_file=hot_file,
         alias=alias,
         call=call,
-        fingerprint=fingerprint,
         tests_module=tests_module,
         extra_pip=tuple(str(x) for x in extra),
         axis=axis,
@@ -388,7 +412,9 @@ def _converse(
                 {"role": "user", "content": "Use the tools, then call submit_proposal."}
             )
         for call in resp.tool_calls:
-            if call.name == "submit_proposal":
+            if call.malformed:
+                reply = call.malformed_reply
+            elif call.name == "submit_proposal":
                 result = validate(call.arguments, repo, draft, template, when)
                 if isinstance(result, str):
                     reply = f"not accepted: {result}"

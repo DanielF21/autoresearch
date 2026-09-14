@@ -39,6 +39,13 @@ def outcome(a: Attempt) -> str:
     if m.untimed:
         # Named, so the reader knows the geomean beside it covers fewer inputs.
         return f"timing failed on {', '.join(m.untimed)}"
+    if m.memoized:
+        # A cached result on repeated calls, which the referee does not score.
+        return f"memoized on {', '.join(m.memoized)}"
+    if m.overfit:
+        # Far faster on the shown instance than on a held out one: a patch that
+        # recognised its input, which the referee does not score either.
+        return f"overfit on {', '.join(m.overfit)}"
     if m.regressions:
         # Named, because which input a patch lost on is the whole lesson.
         return f"slower on {', '.join(m.regressions)}"
@@ -78,7 +85,23 @@ def index_line(a: Attempt) -> str:
     )
 
 
-def render_history(history: tuple[Attempt, ...]) -> str:
+def _withheld(hidden: int, on_disk: bool, listed: bool = True) -> str:
+    """The sentence a hidden slot gets, so the gaps in the numbering are explained."""
+    if hidden == 0:
+        return ""
+    if not on_disk:
+        where = "so /workspace/history does not exist for you"
+    elif listed:
+        where = (
+            "not in this list and not under /workspace/history, which is why the numbering has gaps"
+        )
+    else:
+        where = "not under /workspace/history, which is why the numbering has gaps"
+    verb = "is" if hidden == 1 else "are"
+    return f"{_plural(hidden, 'attempt')} from the record {verb} withheld from you this round: {where}.\n\n"
+
+
+def render_history(history: tuple[Attempt, ...], *, hidden: int = 0, index: bool = True) -> str:
     """An index, not the attempts themselves.
 
     The attempts are on disk in the box, and the agent reads the ones it cares
@@ -87,9 +110,30 @@ def render_history(history: tuple[Attempt, ...]) -> str:
     thousands of tokens per turn and buys nothing the filesystem does not. The
     last column is the one line every rationale opens with, so the whole table
     is a survey of mechanisms, not a leaderboard.
+
+    ``hidden`` is how many attempts the orchestrator withheld from this slot;
+    the sentence that says so is there in every shape of the section, since a
+    directory with gaps in its numbering needs explaining. With ``index`` off
+    there is no table at all: the count, the directory, and how to read it.
     """
     if not history:
+        if hidden:
+            return (
+                "## History\n\nNo earlier attempts are shown to you. "
+                + _withheld(hidden, on_disk=False).strip()
+                + "\n"
+            )
         return "## History\n\nNo earlier attempts. You are first.\n"
+    if not index:
+        return (
+            f"## History\n\n{_plural(len(history), 'earlier attempt')}. Newest last.\n\n"
+            + _withheld(hidden, on_disk=True, listed=False)
+            + "Each is a directory under /workspace/history holding patch.diff, "
+            "measurement.json and rationale.md. Wherever the instructions refer to the "
+            "index, the directory is the record: measurement.json holds the geomean and "
+            "each input's own timing, and rationale.md opens with the line naming the "
+            "mechanism.\n"
+        )
     real = [a for a in history if a.clears_noise]
     best = max((a.measurement.speedup or 0.0 for a in real if a.measurement), default=None)
     head = (
@@ -97,7 +141,8 @@ def render_history(history: tuple[Attempt, ...]) -> str:
         + f"{_plural(len(real), 'real speedup')}"
         + (f", best {best:.2f}x" if best else "")
         + ". Newest last.\n\n"
-        "Each is a directory under /workspace/history holding patch.diff, "
+        + _withheld(hidden, on_disk=True)
+        + "Each is a directory under /workspace/history holding patch.diff, "
         "measurement.json and rationale.md. The measurement holds every input's own "
         "timing, which the two columns here only summarise. The last column is the "
         "first line of that attempt's rationale. Survey the whole table before you "
@@ -154,9 +199,15 @@ def render_target(target: TargetSpec, base_sha: str, pairs: int) -> str:
         f"The same call is timed on every one of these, {_plural(pairs, 'back to back pair')} "
         "each, on every submission. They are not variations to pick between: your patch is "
         "measured on all of them. Each input is the statements below, run once with "
-        f"`{target.alias}` bound to the package and `ROOT` to the tree, and then the call "
-        "is timed in that namespace.\n\n"
+        f"`{target.alias}` bound to the package, `ROOT` to the tree and `SEED` to an integer, "
+        "and then the call is timed in that namespace.\n\n"
         "```\n" + "\n\n".join(_input_block(i) for i in target.inputs) + "\n```\n\n"
+        "`SEED` picks the instance of an input its setup builds. You are shown seed 0, and "
+        "run_benchmark times it. The referee times seed 0 and one seed you are never shown, "
+        "drawn fresh for every measurement, and records the ratio on the seed you did not "
+        "see. A patch that is far faster on seed 0 than on the other is recorded as overfit "
+        "and is not a speedup. The timed region is the call and a walk over its result that "
+        "touches every element, so work deferred into a lazy container is still paid.\n\n"
         "Speedup on one input is the original's time divided by your patched time, taken as "
         "the median over that input's pairs. 2.00x is twice as fast, 0.50x is half as fast, "
         "1.00x is no change. Each input has its own floor above, because a call of a few "
@@ -181,6 +232,14 @@ def render_docs(docs: tuple[tuple[str, str], ...]) -> str:
     return "\n".join(parts)
 
 
+# The closing instruction every version from v1 on ends the first message with.
+# v0 carries its own, from before the survey rule.
+CLOSING = (
+    "You are attempt {attempt:04d}. Survey the history and the hot file, write down what "
+    "you expect before you measure, then make your change."
+)
+
+
 def initial_user_message(
     target: TargetSpec,
     base_sha: str,
@@ -188,16 +247,19 @@ def initial_user_message(
     history: tuple[Attempt, ...],
     attempt_number: int,
     pairs: int,
+    *,
+    closing: str = CLOSING,
+    hidden: int = 0,
+    index: bool = True,
 ) -> str:
     return (
         render_target(target, base_sha, pairs)
         + "\n"
         + render_docs(docs)
         + "\n"
-        + render_history(history)
+        + render_history(history, hidden=hidden, index=index)
         + "\n## This attempt\n\n"
-        f"You are attempt {attempt_number:04d}. Survey the history and the hot file, write "
-        "down what you expect before you measure, then make your change."
+        + closing.format(attempt=attempt_number)
     )
 
 

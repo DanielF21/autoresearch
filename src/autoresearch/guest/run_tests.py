@@ -4,6 +4,14 @@ The package directory, ``root / package_root``, is put first on ``PYTHONPATH``
 so the tests import the code under test and not some other copy. pytest runs
 from ``root`` so the target path is repo relative whatever the layout. Exit
 code 0 means every selected test passed.
+
+With more than one worker the tests of one file stay on one worker, in file
+order (xdist's ``loadfile``). xdist's default scatters a file's tests across
+workers, and a test that leans on a state an earlier test in its file left
+behind then passes or fails by the draw: pyparsing's
+``Test09_WithLeftRecursionParsing::testIndentedBlockClass2`` passed one night's
+check and failed the next morning's twice, on the same commit, while the same
+file passed whole on one worker.
 """
 
 from __future__ import annotations
@@ -63,7 +71,7 @@ def main() -> int:
         "no:cacheprovider",
     ]
     if args.workers > 1:
-        argv += ["-n", str(args.workers)]
+        argv += ["-n", str(args.workers), "--dist", "loadfile"]
     env = dict(os.environ, PYTHONPATH=str((root / args.package_root).resolve()))
     t0 = time.perf_counter()
     try:

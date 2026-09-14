@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from autoresearch import patch
 from autoresearch.types import (
     Attempt,
     AttemptRef,
@@ -204,6 +205,36 @@ def best_ratio(history: tuple[Attempt, ...]) -> tuple[float | None, int | None]:
         if ratio is not None and (best is None or ratio > best):
             best, which = ratio, a.ref.number
     return best, which
+
+
+LEADER_OVERLAP = 0.5
+
+
+def leader_set(history: tuple[Attempt, ...], threshold: float = LEADER_OVERLAP) -> frozenset[int]:
+    """The best attempt and its near copies: what a hidden slot is not shown.
+
+    The best is ``best_ratio``'s choice over the whole history. An attempt joins
+    it when its patch overlaps the best's at ``threshold`` or more, whether or
+    not it cleared the floor: a failed copy of the leader still carries the
+    leader's mechanism. Recomputed from the full history every round, so a
+    hidden slot is blind to the leader at that time, not to a lineage forever.
+    Empty when nothing has cleared the floor.
+    """
+    _, best = best_ratio(history)
+    if best is None:
+        return frozenset()
+    best_patch = next((a.patch for a in history if a.ref.number == best), None)
+    if not best_patch:
+        return frozenset({best})
+    near = {
+        a.ref.number
+        for a in history
+        if a.patch
+        and a.ref.number != best
+        and (share := patch.overlap(best_patch, a.patch)) is not None
+        and share >= threshold
+    }
+    return frozenset({best} | near)
 
 
 def append_round(paths: RunPaths, record: RoundRecord) -> None:

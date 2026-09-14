@@ -14,7 +14,7 @@ from autoresearch.boxes.protocol import BoxError
 from autoresearch.config import RunConfig, SuitePaths, load_config
 from autoresearch.referee.referee import BASE_TREE, PATCHED_TREE, Referee, guest_command
 from autoresearch.types import Attempt, AttemptRef, StopReason, Usage
-from tests.helpers import BASE_SHA
+from tests.helpers import BASE_SHA, arg
 from tests.helpers import referee_box as make_box
 
 ROOT = Path(__file__).parent.parent
@@ -137,7 +137,7 @@ def test_patched_tree_that_cannot_run_skips_timing(config: RunConfig) -> None:
     box = make_box(patched_verify_fails=True)
     m = _referee(box, config).measure(PRECOMPUTE)
     assert m.tests_pass  # the tests ran before the verify step
-    assert _first(m).base_fp == "fp_same" and _first(m).patched_fp == ""
+    assert _first(m).base_fp == "fp_same_0" and _first(m).patched_fp == ""
     assert all(i.pairs == () and i.speedup is None for i in m.inputs)
     assert m.speedup is None
     assert any("verify patched" in e for e in m.errors)
@@ -243,12 +243,15 @@ def test_every_input_is_timed_with_its_own_setup(config: RunConfig) -> None:
     box = make_box()
     _referee(box, config).measure(PRECOMPUTE)
     launches = [c for c in box.commands if "time_target.py" in c and "--repeats" in c]
-    assert len(launches) == _n_inputs(config) * 6 * 2
+    # Six pairs of two launches on each of two instances: the held out one, then the shown.
+    assert len(launches) == _n_inputs(config) * 6 * 2 * 2
     for spec in config.target.inputs:
         mine = [c for c in launches if f"--label {spec.name}/" in c]
-        assert len(mine) == 12, f"{spec.name} should get six pairs of two launches"
+        assert len(mine) == 24, f"{spec.name} should get six pairs of two launches twice"
         assert all(f"--setup {shlex.quote(spec.setup)}" in c for c in mine)
         assert all(f"--call {shlex.quote(config.target.call)}" in c for c in mine)
+        seeds = [arg(c, "--seed") for c in mine]
+        assert seeds[12:] == ["0"] * 12 and len(set(seeds[:12])) == 1 and seeds[0] != "0"
 
 
 def test_every_launch_carries_the_whole_target_and_nothing_is_defaulted(
@@ -262,11 +265,9 @@ def test_every_launch_carries_the_whole_target_and_nothing_is_defaulted(
         assert f"--package {t.package}" in c and f"--alias {t.alias}" in c
         assert f"--package-root {t.package_root}" in c and f"--hot {t.hot_file}" in c
         assert "--graph" not in c
-        assert "--fingerprint" not in c  # only when the target names one
-    fp = replace(config, target=replace(t, fingerprint="sorted(result)"))
-    box = make_box()
-    _referee(box, fp).measure(PRECOMPUTE)
-    assert all("--fingerprint 'sorted(result)'" in c for c in box.commands if "time_target.py" in c)
+        # The whole result is hashed; there is no expression a target could
+        # name to narrow what is compared.
+        assert "--fingerprint" not in c
 
 
 def test_the_full_suite_is_the_configured_path_not_derived_from_the_hot_file(
@@ -380,3 +381,95 @@ def test_guest_command_quotes_and_pins() -> None:
 
 def test_fake_box_ok_helper_is_used() -> None:
     assert ok("x").stdout == "x"
+
+
+def test_a_cached_result_on_repeated_calls_is_memoized_not_a_speedup(config: RunConfig) -> None:
+    """t1_p2_w16 from round 5: the whole answer stored in the graph's cache dict,
+    every call after the first free, 500x to 6400x recorded as real. The guest now
+    reports each launch's first call apart from the rest, and the gap on the
+    patched tree alone is the tell."""
+    box = make_box(speedup=2000.0, memoized_inputs=("er1000_005", "gn800"))
+    m = _referee(box, config).measure(PRECOMPUTE)
+    assert m.tests_pass and m.result_matches is True
+    assert m.speedup is not None and m.speedup > 100
+    assert m.memoized == ("er1000_005", "gn800")
+    assert _first(m, "er1000_005").memoized and not _first(m, "er1000_001").memoized
+    assert any("memoized" in e for e in _first(m, "gn800").errors)
+    assert not m.clears_noise
+    p = _first(m, "er1000_005").pairs[0]
+    assert p.patched_first_s == 1.0 and p.patched_warm_s == pytest.approx(1 / 2000.0)
+    assert p.base_first_s == 1.0 and p.base_warm_s == 1.0
+
+
+def test_an_honest_speedup_is_not_memoized(config: RunConfig) -> None:
+    m = _referee(make_box(speedup=30.0), config).measure(PRECOMPUTE)
+    assert m.clears_noise and m.memoized == () and m.overfit == ()
+    p = _first(m).pairs[0]
+    assert p.patched_first_s == p.patched_warm_s
+    # The score is the held out instance's; the shown one is recorded beside it.
+    i = _first(m)
+    assert i.seed != 0 and all(p.seed == i.seed for p in i.pairs)
+    assert all(p.seed == 0 for p in i.shown_pairs) and len(i.shown_pairs) == 6
+    assert i.speedup == pytest.approx(30.0) and i.shown_speedup == pytest.approx(30.0)
+    assert i.held_out_base_fp == i.held_out_patched_fp == f"fp_same_{i.seed}"
+
+
+def test_a_patch_that_recognises_the_shown_instance_is_overfit_not_a_speedup(
+    config: RunConfig,
+) -> None:
+    """pycodestyle_p3_w16 attempts 0233 and 0247: the six benchmark files
+    regenerated at import and matched by string equality, 2985x and 3470x
+    recorded as real. The referee times a seed the worker never saw and scores
+    that; the gap between the two is the tell."""
+    box = make_box(speedup=2985.0, overfit_inputs=("er1000_005", "gn800"))
+    ref = Referee(box, config, draw_seed=lambda: 777)
+    ref.setup()
+    m = ref.measure(PRECOMPUTE)
+    assert m.tests_pass and m.result_matches is True
+    assert m.overfit == ("er1000_005", "gn800") and not m.clears_noise
+    fitted, honest = _first(m, "er1000_005"), _first(m, "er1000_001")
+    assert fitted.seed == 777 and fitted.speedup == pytest.approx(1.0)
+    assert fitted.shown_speedup == pytest.approx(2985.0) and fitted.overfit
+    assert any("overfit" in e and "2985.0x" in e for e in fitted.errors)
+    assert honest.speedup == pytest.approx(2985.0) and not honest.overfit
+    # The geomean is over held out ratios, so the two recognised inputs count as 1.0x.
+    assert m.speedup is not None and m.speedup == pytest.approx(2985.0 ** (3 / 5))
+    assert m.to_dict()["overfit"] == ["er1000_005", "gn800"]
+
+
+def test_a_patch_wrong_on_the_held_out_instance_computed_the_wrong_thing(
+    config: RunConfig,
+) -> None:
+    box = make_box(speedup=3.0, held_out_wrong=("gn800",))
+    m = _referee(box, config).measure(PRECOMPUTE)
+    assert m.tests_pass and m.result_matches is False and not m.clears_noise
+    i = _first(m, "gn800")
+    assert i.base_fp == i.patched_fp and i.held_out_base_fp != i.held_out_patched_fp
+    assert i.result_matches is False and _first(m, "er1000_005").result_matches is True
+    assert i.speedup is not None  # still timed and recorded in full
+
+
+def test_measure_refuses_a_setup_that_does_not_read_seed_by_name(config: RunConfig) -> None:
+    first, *rest = config.target.inputs
+    point = replace(first, setup=first.setup.replace(" + SEED", ""))
+    one_point = replace(config, target=replace(config.target, inputs=(point, *rest)))
+    assert one_point.target.unseeded == (first.name,)
+    box = make_box()
+    ref = _referee(box, one_point)
+    with pytest.raises(ValueError, match=f"SEED: {first.name}"):
+        ref.measure(PRECOMPUTE)
+    assert not any("apply_patch.py" in c for c in box.commands)
+
+
+def test_null_pairs_time_a_held_out_seed_per_round(config: RunConfig) -> None:
+    """A floor is the family's, not one instance's: each round of null pairs
+    builds the inputs at a seed of its own, the way a measurement would."""
+    drawn = iter([11, 22])
+    box = make_box()
+    ref = Referee(box, config, draw_seed=lambda: next(drawn))
+    ref.setup()
+    out = ref.null_pairs(rounds=2)
+    for pairs in out.values():
+        assert [p.seed for p in pairs] == [11] * 6 + [22] * 6
+    verifies = [c for c in box.commands if "--verify" in c]
+    assert all(arg(c, "--seed") == "0" for c in verifies)

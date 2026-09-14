@@ -1,0 +1,184 @@
+# pyparsing: written by autoresearch intake propose at 2026-09-14 06:29:58.
+# Run `autoresearch next configs/pyparsing_w16.toml` for the step it is at.
+#
+# input axis: expression shape from flat operator sequences to deeply nested parentheses
+# why it matters: Depth changes where time goes in core.py: flat inputs spend almost all
+#                 their time in CharsNotIn.parseImpl and _MultipleMatch.parseImpl, while
+#                 deeply nested inputs recurse through Forward.parseImpl/MatchFirst and
+#                 only parse short leaf tokens. An optimization that speeds one of those
+#                 regions (for example caching Forward results, or streamlining the
+#                 repeated match loop) could regress the other, so the inputs check both
+#                 ends of the axis.
+
+[run]
+run_id = "pyparsing_w16"
+width = 16
+rounds = 16
+
+[target]
+name = "pyparsing"
+repo = "https://github.com/pyparsing/pyparsing"
+sha = "efd56db4e59f36b1673ce0eb0823e3afaa9d1201"
+package = "pyparsing"
+alias = "pp"
+package_root = "."
+hot_file = "pyparsing/core.py"
+call = "grammar.parse_string(text, parse_all=True)"
+pip = ["railroad-diagrams", "jinja2", "matplotlib"]
+allow = ["pyparsing/**"]
+deny = ["tests/**", "docs/**", "examples/**"]
+fingerprint = "list(result)[:20] + [len(result), list(result)[-5:]]"
+docs = ["configs/seeded/docs/pyparsing_w16/profile_inputs.txt", "configs/seeded/docs/pyparsing_w16/profile_flat_long_flat.txt", "configs/seeded/docs/pyparsing_w16/profile_flat_long_callers.txt"]
+
+[target.tests]
+module = "tests/test_unit.py"
+full = "tests"
+
+# regime: depth 0; long flat sequence of 5000 operands; ZeroOrMore/And loops dominate
+# why: No parentheses reach the recursive Forward path, so nearly all time is in
+#      CharsNotIn plus repeated _MultipleMatch and And parsing.
+[[target.inputs]]
+name = "flat_long"
+noise_floor = 1.0188   # calibrated 20260914-064859, 42 null pairs
+setup = '''
+import random
+pp.ParserElement.disable_memoization()
+rnd = random.Random(SEED)
+ops = ("+", "-", "*", "/")
+number = pp.CharsNotIn("+-*/()").set_name("number")
+muldiv = (pp.Literal("*") | pp.Literal("/")).set_name("muldiv")
+addsub = (pp.Literal("+") | pp.Literal("-")).set_name("addsub")
+lpar = pp.Suppress("(")
+rpar = pp.Suppress(")")
+expr = pp.Forward().set_name("expr")
+atom = (number | lpar + expr + rpar).set_name("atom")
+term = (atom + pp.ZeroOrMore(muldiv + atom)).set_name("term")
+expr <<= term + pp.ZeroOrMore(addsub + term)
+grammar = expr
+num = lambda: str(rnd.randint(100000, 999999))
+n_terms = 5000
+text = num() + "".join(rnd.choice(ops) + num() for _ in range(n_terms - 1))
+'''
+
+# regime: depth 1; many small parenthesized subexpressions; repeated shallow recursive
+#         Forward entry
+# why: Each group enters lpar+expr+rpar and exits immediately, so shallow recursion
+#      alternates with the outer sequence loops.
+[[target.inputs]]
+name = "shallow_groups"
+noise_floor = 1.0181   # calibrated 20260914-064859, 42 null pairs
+setup = '''
+import random
+pp.ParserElement.disable_memoization()
+rnd = random.Random(SEED)
+ops = ("+", "-", "*", "/")
+number = pp.CharsNotIn("+-*/()").set_name("number")
+muldiv = (pp.Literal("*") | pp.Literal("/")).set_name("muldiv")
+addsub = (pp.Literal("+") | pp.Literal("-")).set_name("addsub")
+lpar = pp.Suppress("(")
+rpar = pp.Suppress(")")
+expr = pp.Forward().set_name("expr")
+atom = (number | lpar + expr + rpar).set_name("atom")
+term = (atom + pp.ZeroOrMore(muldiv + atom)).set_name("term")
+expr <<= term + pp.ZeroOrMore(addsub + term)
+grammar = expr
+num = lambda: str(rnd.randint(100000, 999999))
+groups = []
+for _ in range(1500):
+    groups.append("(" + num() + rnd.choice(ops) + num() + ")")
+text = groups[0] + "".join(rnd.choice(("+", "-")) + g for g in groups[1:])
+'''
+
+# regime: depth 11; broad balanced binary expression tree with 2048 leaves; mixed
+#         recursion and broad branching
+# why: Every internal node goes through a parenthesized recursive expr, while the node
+#      count stresses both Forward recursion and leaf parsing.
+[[target.inputs]]
+name = "balanced_bush"
+noise_floor = 1.0358   # calibrated 20260914-064859, 42 null pairs
+setup = '''
+import random
+pp.ParserElement.disable_memoization()
+rnd = random.Random(SEED)
+ops = ("+", "-", "*", "/")
+number = pp.CharsNotIn("+-*/()").set_name("number")
+muldiv = (pp.Literal("*") | pp.Literal("/")).set_name("muldiv")
+addsub = (pp.Literal("+") | pp.Literal("-")).set_name("addsub")
+lpar = pp.Suppress("(")
+rpar = pp.Suppress(")")
+expr = pp.Forward().set_name("expr")
+atom = (number | lpar + expr + rpar).set_name("atom")
+term = (atom + pp.ZeroOrMore(muldiv + atom)).set_name("term")
+expr <<= term + pp.ZeroOrMore(addsub + term)
+grammar = expr
+num = lambda: str(rnd.randint(100000, 999999))
+def tree(depth):
+    if depth == 0:
+        return num()
+    return "(" + tree(depth - 1) + rnd.choice(ops) + tree(depth - 1) + ")"
+text = tree(11)
+'''
+
+# regime: depth 60; 40 narrow nested chains; recursive descent through deep Forward
+#         nests
+# why: The parser repeatedly descends long parenthesized Forward nests, so recursive
+#      parsing dominates over long ZeroOrMore loops.
+[[target.inputs]]
+name = "deep_forest"
+noise_floor = 1.0272   # calibrated 20260914-064859, 42 null pairs
+setup = '''
+import random
+pp.ParserElement.disable_memoization()
+rnd = random.Random(SEED)
+ops = ("+", "-", "*", "/")
+number = pp.CharsNotIn("+-*/()").set_name("number")
+muldiv = (pp.Literal("*") | pp.Literal("/")).set_name("muldiv")
+addsub = (pp.Literal("+") | pp.Literal("-")).set_name("addsub")
+lpar = pp.Suppress("(")
+rpar = pp.Suppress(")")
+expr = pp.Forward().set_name("expr")
+atom = (number | lpar + expr + rpar).set_name("atom")
+term = (atom + pp.ZeroOrMore(muldiv + atom)).set_name("term")
+expr <<= term + pp.ZeroOrMore(addsub + term)
+grammar = expr
+num = lambda: str(rnd.randint(100000, 999999))
+def deep_expr(depth):
+    out = num()
+    for _ in range(depth):
+        if rnd.random() < 0.5:
+            out = "(" + out + rnd.choice(ops) + num() + ")"
+        else:
+            out = "(" + num() + rnd.choice(ops) + out + ")"
+    return out
+chains = [deep_expr(60) for _ in range(40)]
+text = chains[0] + "".join(rnd.choice(("+", "-")) + c for c in chains[1:])
+'''
+
+[worker]
+model = "deepseek/deepseek-v4-pro-0813"
+reasoning_effort = "high"
+completion_window = "asap"
+max_turns = 240
+max_seconds = 10800
+max_input_tokens = 24000000
+turn_timeout = 600
+
+[referee]
+pairs = 6
+repeats_per_launch = 7
+min_clean_pairs = 4
+hash_seeds = [0, 1, 2, 3, 4]
+
+[boxes]
+worker_size = "m"
+referee_size = "m"
+control_size = "s"
+disk_gib = 32
+
+[storage]
+volume = "autoresearch"
+mount = "/mnt/autoresearch"
+
+[observe]
+enabled = true
+session_prefix = ""

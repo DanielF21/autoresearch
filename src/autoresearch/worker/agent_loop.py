@@ -15,7 +15,10 @@ Caps and kill rules, each recorded as the stop reason:
   the diff as it stands. The time cap is announced with a margin of a few
   median turns, since the next turn's length is unknown.
 - max_input_tokens from the config, a hard stop
-- repeated_tool_call: the same tool with the same arguments three times running
+- repeated_tool_call: the same tool with the same arguments ten times running.
+  Ten, not three: run_benchmark takes no arguments, so repeating a timing to
+  average out noise looked like a loop and cut two attempts short in the
+  intervention runs of 2026-09-13.
 - no_progress: two consecutive turns with no tool call, after one nudge
 - model_error and box_error: the platform failed after the client's retry
 """
@@ -42,7 +45,7 @@ from autoresearch.worker.protocol import WorkerInput
 
 GUEST_SOURCE = Path(__file__).parent.parent / "guest"
 SETUP_TIMEOUT = 600
-REPEAT_LIMIT = 3
+REPEAT_LIMIT = 10
 NO_PROGRESS_LIMIT = 2
 TRANSCRIPT_CLIP = 4000
 TIME_MARGIN_TURNS = 2.0  # median turns kept in hand before the time cap
@@ -136,7 +139,11 @@ class AgentLoopWorker:
             f" && git rev-parse HEAD"
             f" && rm -rf {BASE_DIR} && git worktree prune"
             f" && git worktree add -q --detach {BASE_DIR} HEAD"
-            f" && python3 -m compileall -q {REPO_DIR} {BASE_DIR} > /dev/null"
+            # compileall exits 1 when any file fails to compile, and a linter's test
+            # data holds files that are meant not to (pycodestyle's testing/data
+            # failed every worker of three runs on 2026-09-13). The warm cache is
+            # what matters, so its exit status is not the setup's.
+            f" && (python3 -m compileall -q {REPO_DIR} {BASE_DIR} > /dev/null 2>&1 || true)"
             f" && chmod -R a-w {BASE_DIR}"
             f" && python3 -c 'import sys; print(\"python\", sys.version.split()[0])'",
             timeout=SETUP_TIMEOUT,
@@ -254,8 +261,9 @@ class AgentLoopWorker:
             return finish(StopReason.BOX_ERROR, error=str(e))
 
         ctx = tools.ToolContext(box=box, target=inp.target)
+        index = self._config.worker.history_index
         messages: list[Message] = [
-            {"role": "system", "content": prompt.system_prompt(inp.prompt, python)},
+            {"role": "system", "content": prompt.system_prompt(inp.prompt, python, index)},
             {
                 "role": "user",
                 "content": prompt.initial_user_message(
@@ -265,6 +273,9 @@ class AgentLoopWorker:
                     inp.history,
                     inp.ref.number,
                     self._config.referee.pairs,
+                    closing=prompt.closing(inp.prompt),
+                    hidden=len(inp.hidden_numbers),
+                    index=index,
                 ),
             },
         ]
@@ -344,7 +355,11 @@ class AgentLoopWorker:
                     recent = recent[-REPEAT_LIMIT:]
                     if len(recent) == REPEAT_LIMIT and len(set(recent)) == 1:
                         return finish(StopReason.REPEATED_TOOL_CALL, patch=self._collect_patch(box))
-                    result = tools.execute(ctx, call.name, call.arguments)
+                    result = (
+                        tools.ToolResult(call.malformed_reply)
+                        if call.malformed
+                        else tools.execute(ctx, call.name, call.arguments)
+                    )
                     transcript.add(
                         kind="tool", turn=turns, name=call.name, result=_clip(result.text)
                     )

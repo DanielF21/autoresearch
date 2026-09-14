@@ -96,6 +96,31 @@ def changed_line_count(diff: str) -> int:
     return n
 
 
+def added_lines(diff: str) -> frozenset[str]:
+    """The distinct added lines of a diff, stripped, without the ``+++`` headers."""
+    return frozenset(
+        stripped
+        for line in diff.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+        if (stripped := line[1:].strip())
+    )
+
+
+def overlap(diff_a: str, diff_b: str) -> float | None:
+    """How much two diffs share, as the fraction of the smaller one's added lines
+    that the other also adds. Symmetric.
+
+    None when either diff adds nothing, so a patch that only deletes overlaps
+    nothing. Two known edges: a one line patch that happens to share that line
+    with a large one scores 1.0, and the measure ignores where a line lands,
+    so it reads the mechanism, not the placement.
+    """
+    a, b = added_lines(diff_a), added_lines(diff_b)
+    if not a or not b:
+        return None
+    return len(a & b) / min(len(a), len(b))
+
+
 def normalised_hash(diff: str) -> str:
     """A hash that is the same for two diffs that make the same change.
 

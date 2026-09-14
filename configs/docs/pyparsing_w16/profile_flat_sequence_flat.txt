@@ -1,0 +1,24 @@
+cProfile of grammar.parse_string(data, parse_all=True) with n = 5000 pieces = [] for i in range(n): if i: pieces.append(pp.Suppress(pp.Literal(';'))) pieces.append(pp.CharsNotIn(';')) grammar = pp.And(pieces) grammar.streamline() data = ";".join(f"v{i}" for i in range(n))
+at pyparsing efd56db4e59f, the base commit for every attempt.
+         210103 function calls (195103 primitive calls) in 0.088 seconds
+
+   Ordered by: internal time
+   List reduced from 56 to 14 due to restriction <14>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+  15002/2    0.032    0.000    0.088    0.044 pyparsing/core.py:928(_parseNoCache)
+    15002    0.012    0.000    0.019    0.000 pyparsing/results.py:170(__new__)
+        2    0.007    0.004    0.088    0.044 pyparsing/core.py:4618(parseImpl)
+    45017    0.005    0.000    0.005    0.000 {built-in method builtins.isinstance}
+     9999    0.005    0.000    0.007    0.000 pyparsing/results.py:549(__iadd__)
+    15002    0.005    0.000    0.007    0.000 pyparsing/results.py:194(__init__)
+     5000    0.005    0.000    0.006    0.000 pyparsing/core.py:3943(parseImpl)
+    25007    0.003    0.000    0.003    0.000 {built-in method builtins.len}
+    10002    0.003    0.000    0.003    0.000 pyparsing/core.py:909(preParse)
+    15004    0.002    0.000    0.002    0.000 pyparsing/util.py:500(deprecate_argument)
+    15004    0.002    0.000    0.002    0.000 {built-in method __new__ of type object at 0x144d380}
+     4999    0.002    0.000    0.021    0.000 pyparsing/core.py:5167(parseImpl)
+     9999    0.001    0.000    0.001    0.000 pyparsing/results.py:321(__bool__)
+     5000    0.001    0.000    0.001    0.000 {built-in method builtins.min}
+
+

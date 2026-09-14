@@ -36,6 +36,29 @@ def tool_call(name: str, arguments: dict[str, Any], call_id: str = "") -> ModelR
     )
 
 
+def malformed_call(name: str, raw: str, call_id: str = "call_cut") -> ModelResponse:
+    """A response whose tool call arguments are not JSON, as ``parse_response`` returns it:
+    empty arguments, the raw text kept, and the echo repaired to ``{}``."""
+    return ModelResponse(
+        content="",
+        reasoning="thinking",
+        tool_calls=(
+            ToolCall(id=call_id, name=name, arguments={}, raw_arguments=raw, malformed=True),
+        ),
+        usage=Usage(prompt_tokens=100, cached_tokens=50, completion_tokens=20, reasoning_tokens=5),
+        finish_reason="tool_calls",
+        latency_s=0.01,
+        message={
+            "role": "assistant",
+            "content": "",
+            "reasoning_content": "thinking",
+            "tool_calls": [
+                {"id": call_id, "type": "function", "function": {"name": name, "arguments": "{}"}}
+            ],
+        },
+    )
+
+
 def text(content: str) -> ModelResponse:
     """A response with no tool call."""
     return ModelResponse(

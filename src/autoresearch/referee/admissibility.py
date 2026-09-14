@@ -10,6 +10,11 @@ The rules follow from how the referee measures, not from any target:
    calibrated floor is tighter than a few percent, short enough that
    ``repeats_per_launch`` calls fit inside ``LAUNCH_TIMEOUT``.
 4. Both suites must pass on the base tree and finish inside their timeout.
+5. The seed must matter: the result at a held out seed must fingerprint
+   differently from the result at seed 0, or a patch can carry the answer
+   (pycodestyle_p3_w16 attempt 0233 did, by string equality against the
+   regenerated inputs), and the held out call must sit in the same size class
+   as the shown one, or the floor calibrated on the family does not hold.
 
 Two things are warnings rather than failures, because they change what a run
 means without stopping it: a hot file with a small share of self time (the
@@ -31,7 +36,7 @@ import json
 from dataclasses import dataclass
 
 from autoresearch.config import TargetSpec
-from autoresearch.referee.referee import LAUNCH_TIMEOUT, TESTS_TIMEOUT, Survey
+from autoresearch.referee.referee import LAUNCH_TIMEOUT, TESTS_TIMEOUT, InputSurvey, Survey
 
 CALL_MIN_S = 0.005
 # Headroom under the launch timeout for interpreter start, import and setup.
@@ -40,9 +45,14 @@ HOT_SHARE_WARN = 0.2
 # Chosen, not measured: seconds of timing launches one attempt may cost the referee.
 # The estimate uses call times under cProfile, which run slower than plain calls.
 # Networkx's five inputs take about 2.3 s a call plainly (t1_w4d base medians), about
-# 200 s per attempt, so they fit even at several times that under cProfile.
-# Calibration times seven attempts' worth of pairs, so this also bounds it.
+# 200 s per attempt on one instance, so they fit even at several times that under
+# cProfile. Calibration times seven attempts' worth of pairs, so this also bounds it.
 REFEREE_TIMING_BUDGET_S = 1200.0
+# The referee times two instances of every input: the one the worker was shown
+# and one it was not.
+INSTANCES_PER_INPUT = 2
+# The held out call may take this many times more or less than the shown one.
+SIZE_CLASS_FACTOR = 3.0
 
 
 @dataclass(frozen=True)
@@ -78,11 +88,13 @@ def call_max_s(repeats_per_launch: int) -> float:
 def timing_per_attempt_s(survey: Survey, pairs: int, repeats_per_launch: int) -> dict[str, float]:
     """Seconds of timing launches one attempt costs on each input that runs.
 
-    Each pair launches the base and the patched tree once, and each launch makes
-    ``repeats_per_launch`` calls after its fixed start cost.
+    Each pair launches the base and the patched tree once, each launch makes
+    ``repeats_per_launch`` calls after its fixed start cost, and every input is
+    timed on ``INSTANCES_PER_INPUT`` instances.
     """
     return {
-        i.name: pairs
+        i.name: INSTANCES_PER_INPUT
+        * pairs
         * 2
         * (
             repeats_per_launch * i.call_s
@@ -91,6 +103,34 @@ def timing_per_attempt_s(survey: Survey, pairs: int, repeats_per_launch: int) ->
         for i in survey.inputs
         if not i.error
     }
+
+
+def _seed_matters(i: InputSurvey) -> Verdict:
+    """Rule 5: the held out instance computes something else, at the same size."""
+    rule = f"{i.name} seed matters"
+    if not i.seed_matters:
+        return Verdict(
+            rule,
+            "fail",
+            f"the result at seed 0 and at seed {i.held_out_seed} fingerprint the same "
+            f"({i.held_out_fp}); a result that does not depend on the instance verifies "
+            "nothing, and a patch can carry it. Make the setup read SEED so that two seeds "
+            "give two results",
+        )
+    shown, held = i.call_s, i.held_out_call_s
+    if shown > 0 and not (shown / SIZE_CLASS_FACTOR <= held <= shown * SIZE_CLASS_FACTOR):
+        return Verdict(
+            rule,
+            "fail",
+            f"seed {i.held_out_seed} takes {held:.4f}s against {shown:.4f}s at seed 0, outside "
+            f"a factor of {SIZE_CLASS_FACTOR:.0f}; held out instances must be the same size "
+            "class, or the floor calibrated on the family does not hold",
+        )
+    return Verdict(
+        rule,
+        "pass",
+        f"seed {i.held_out_seed} fingerprints {i.held_out_fp} in {held:.4f}s",
+    )
 
 
 def judge(
@@ -156,6 +196,7 @@ def judge(
             )
         else:
             out.append(Verdict(f"{i.name} call length", "pass", f"{i.call_s:.4f}s"))
+        out.append(_seed_matters(i))
 
     times = timing_per_attempt_s(survey, pairs, repeats_per_launch)
     if times:
@@ -165,7 +206,8 @@ def judge(
         )
         basis = (
             f"about {total:.0f}s of timing per attempt, {pairs} pairs of {repeats_per_launch} "
-            f"calls per tree on each input, from call times under cProfile; slowest: {slowest}"
+            f"calls per tree on each input on {INSTANCES_PER_INPUT} instances, from call times "
+            f"under cProfile; slowest: {slowest}"
         )
         if total > REFEREE_TIMING_BUDGET_S:
             out.append(
@@ -187,11 +229,13 @@ def judge(
             out.append(Verdict(f"{scope} suite", "fail", err))
             continue
         if not t.ok:
+            named = ", ".join(t.failed_tests[:5]) or "pytest named no test; see the box log"
             out.append(
                 Verdict(
                     f"{scope} suite",
                     "fail",
-                    f"{t.failed} failed, {t.errors} errors on the base tree; a patch could never pass",
+                    f"{t.failed} failed, {t.errors} errors on the base tree ({named}); "
+                    "a patch could never pass",
                 )
             )
         elif t.duration_s > TESTS_TIMEOUT - 60:
@@ -234,7 +278,8 @@ def render(target: TargetSpec, survey: Survey, verdicts: tuple[Verdict, ...]) ->
         lines.append(f"python {python} in the box")
     lines.append("")
     lines.append(
-        f"{'input':<16} {'call':>9} {'hot share':>9} {'import':>7} {'setup':>7} {'fixed':>7}  fingerprints"
+        f"{'input':<16} {'call':>9} {'hot share':>9} {'import':>7} {'setup':>7} {'fixed':>7}  "
+        "fingerprints at seed 0, then at the held out seed"
     )
     for i in survey.inputs:
         if i.error:
@@ -243,7 +288,8 @@ def render(target: TargetSpec, survey: Survey, verdicts: tuple[Verdict, ...]) ->
         fixed = "--" if i.fixed_s is None else f"{i.fixed_s:.2f}s"
         lines.append(
             f"{i.name:<16} {i.call_s:>8.4f}s {100 * i.hot_share:>8.1f}% {i.import_s:>6.2f}s "
-            f"{i.setup_s:>6.2f}s {fixed:>7}  {i.fingerprints[0]} {i.fingerprints[1]}"
+            f"{i.setup_s:>6.2f}s {fixed:>7}  {i.fingerprints[0]} {i.fingerprints[1]}  "
+            f"{i.held_out_fp} (seed {i.held_out_seed}, {i.held_out_call_s:.4f}s)"
         )
     lines.append("")
     for t in survey.tests:

@@ -26,6 +26,10 @@ class WorkerInput:
     docs: tuple[tuple[str, str], ...]
     cache_key: str
     prompt: str = "v1"  # the system prompt version this slot runs with
+    # Attempt numbers the orchestrator withheld from this slot: absent from
+    # ``history`` and so from the box's history directory. Empty for a slot that
+    # sees everything, which is every slot outside the hidden leader experiment.
+    hidden_numbers: tuple[int, ...] = ()
 
 
 class Worker(Protocol):

@@ -21,7 +21,8 @@ from typing import Any
 
 from autoresearch.boxes.image import BASE_DIR, REPO_DIR
 from autoresearch.boxes.protocol import Box
-from autoresearch.config import TargetSpec
+from autoresearch.config import BenchmarkInput, TargetSpec
+from autoresearch.referee import timing
 from autoresearch.referee.referee import PIN_CORE, guest_command, target_args
 
 MAX_OUTPUT = 12_000
@@ -124,11 +125,36 @@ def run_tests(ctx: ToolContext, _args: dict[str, Any]) -> ToolResult:
     return ToolResult(head + tail)
 
 
+def _pair(ctx: ToolContext, spec: BenchmarkInput, order: tuple[str, str], seed: int) -> float:
+    """One back to back pair on one instance: base over working. Raises ToolError."""
+    t = ctx.target
+    times: dict[str, float] = {}
+    for which in order:
+        root = ctx.base if which == "base" else ctx.repo
+        rec = _guest(
+            ctx,
+            "time_target.py",
+            *target_args(t, root, spec, seed),
+            "--repeats",
+            "3",
+            "--no-counters",
+            timeout=600,
+            pin=PIN_CORE,
+        )
+        if rec.get("error"):
+            raise ToolError(str(rec["error"]))
+        times[which] = float(rec["min_all"])
+    return times["base"] / times["working"]
+
+
 def run_benchmark(ctx: ToolContext, _args: dict[str, Any]) -> ToolResult:
-    """Two back to back pairs per input, working tree against the untouched base.
+    """Three back to back pairs per input, working tree against the untouched base.
 
     Every input, not just the first, because a patch can be enormous on one and
-    slower on another and the worker has no other way to see that. Noisy by
+    slower on another and the worker has no other way to see that. Two pairs on
+    the instance the worker is shown, seed 0, and one on a seed drawn here and
+    never shown, because the referee scores an instance the worker did not see
+    and a patch that recognises its input is worth nothing there. Noisy by
     design: it says whether the tree is warm or cold. The referee's own pairs,
     more of them per input, are the measurement that goes into history.
 
@@ -139,49 +165,42 @@ def run_benchmark(ctx: ToolContext, _args: dict[str, Any]) -> ToolResult:
     lines: list[str] = []
     ratios: list[float] = []
     for spec in t.inputs:
-        pair_ratios: list[float] = []
-        failed = ""
-        for order in (("base", "working"), ("working", "base")):
-            times: dict[str, float] = {}
-            for which in order:
-                root = ctx.base if which == "base" else ctx.repo
-                rec = _guest(
-                    ctx,
-                    "time_target.py",
-                    *target_args(t, root, spec),
-                    "--repeats",
-                    "3",
-                    "--no-counters",
-                    timeout=600,
-                    pin=PIN_CORE,
-                )
-                if rec.get("error"):
-                    failed = str(rec["error"])
-                    break
-                times[which] = float(rec["min_all"])
-            if failed:
-                break
-            pair_ratios.append(times["base"] / times["working"])
-        if failed:
-            lines.append(f"  {spec.name:<14} error: {_clip(failed, 200)}")
+        try:
+            shown = [
+                _pair(ctx, spec, ("base", "working"), timing.SHOWN_SEED),
+                _pair(ctx, spec, ("working", "base"), timing.SHOWN_SEED),
+            ]
+            seed = timing.draw_seed()
+            held_out = _pair(ctx, spec, ("base", "working"), seed)
+        except ToolError as e:
+            lines.append(f"  {spec.name:<14} error: {_clip(str(e), 200)}")
             continue
-        mean = sum(pair_ratios) / len(pair_ratios)
-        ratios.append(mean)
-        flag = "  <-- SLOWER" if mean < 1.0 else ""
+        mean = sum(shown) / len(shown)
+        ratios.append(held_out)
+        flag = ""
+        if held_out < 1.0:
+            flag = "  <-- SLOWER"
+        elif timing.overfit(mean, held_out, spec.noise_floor or 1.0):
+            flag = "  <-- OVERFIT"
         lines.append(
-            f"  {spec.name:<14} {mean:>8.3f}x   (pairs "
-            f"{pair_ratios[0]:.3f}, {pair_ratios[1]:.3f}){flag}"
+            f"  {spec.name:<14} shown {mean:>8.3f}x (pairs {shown[0]:.3f}, {shown[1]:.3f})   "
+            f"held out {held_out:>8.3f}x (seed {seed}){flag}"
         )
-    head = "indicative speedup per input, 2 pairs each on a shared machine:\n"
+    head = (
+        "indicative speedup per input on a shared machine: two pairs on the instance you are "
+        "shown, one pair on a seed you are not:\n"
+    )
     if not ratios:
         return ToolResult(head + "\n".join(lines) + "\nNothing timed.")
     geo = math.exp(sum(math.log(r) for r in ratios if r > 0) / len(ratios))
     worst = min(ratios)
     tail = (
-        f"\ngeometric mean {geo:.3f}x, worst {worst:.3f}x. The referee scores the geometric "
-        "mean over all inputs and records a patch as a real speedup only if no input is "
-        "slower and at least one clears its own noise floor. Being slower anywhere "
-        "disqualifies a patch however fast it is elsewhere."
+        f"\ngeometric mean {geo:.3f}x, worst {worst:.3f}x, over the held out ratios. The "
+        "referee scores the geometric mean over all inputs on seeds you never see, and "
+        "records a patch as a real speedup only if no input is slower and at least one "
+        "clears its own noise floor. Being slower anywhere disqualifies a patch however "
+        "fast it is elsewhere, and so does being far faster on the shown instance than on "
+        "a held out one."
     )
     return ToolResult(head + "\n".join(lines) + tail)
 
@@ -249,11 +268,13 @@ TOOLS: tuple[Tool, ...] = (
     Tool(
         "run_benchmark",
         "Time the target on your working tree against the untouched base commit, on every "
-        "benchmark input, two back to back pairs each. Reports a ratio per input plus their "
-        "geometric mean. Use it to check a prediction you have written down, and once "
-        "before you submit: a patch that is slower on any input cannot count as a speedup, "
-        "and this is the only way to see that coming. Indicative only: two pairs on a "
-        "shared machine, not the referee's measurement.",
+        "benchmark input: two back to back pairs on the instance you are shown (SEED 0) and "
+        "one pair on a seed you are not shown. Reports both ratios per input and the "
+        "geometric mean of the held out ones, which is what the referee scores. Use it to "
+        "check a prediction you have written down, and once before you submit: a patch "
+        "that is slower on any input, or far faster on the shown instance than on a held "
+        "out one, cannot count as a speedup, and this is the only way to see that coming. "
+        "Indicative only: three pairs on a shared machine, not the referee's measurement.",
         _params({}, []),
         run_benchmark,
     ),

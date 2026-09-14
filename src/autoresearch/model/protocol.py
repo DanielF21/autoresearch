@@ -25,6 +25,16 @@ class ToolCall:
     name: str
     arguments: dict[str, Any]
     raw_arguments: str = ""
+    malformed: bool = False
+    """``raw_arguments`` was not JSON; ``arguments`` is empty and the call should be refused."""
+
+    @property
+    def malformed_reply(self) -> str:
+        """The tool result for a call the model cut off or misquoted, so it tries again."""
+        return (
+            f"error: the arguments of this {self.name} call were not valid JSON and it did"
+            f" not run; call it again with a complete JSON object: {self.raw_arguments[:200]!r}"
+        )
 
 
 @dataclass(frozen=True)

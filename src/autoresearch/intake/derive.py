@@ -42,11 +42,16 @@ class Draft:
     template: str
     benchmarks: tuple[str, ...] = ()
     findings: tuple[scope.Finding, ...] = field(default_factory=tuple)
+    single_module: bool = False
 
     @property
     def package_dir(self) -> str:
-        """The package directory relative to the repo, with no leading ``./``."""
-        return self.package if self.package_root == "." else f"{self.package_root}/{self.package}"
+        """The package directory relative to the repo, with no leading ``./``.
+
+        For a single module this is the module file itself, ``package.py``.
+        """
+        prefix = "" if self.package_root == "." else f"{self.package_root}/"
+        return f"{prefix}{self.package}.py" if self.single_module else f"{prefix}{self.package}"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -67,6 +72,7 @@ class Draft:
             template=d["template"],
             benchmarks=tuple(d.get("benchmarks", ())),
             findings=tuple(scope.Finding(**f) for f in d.get("findings", ())),
+            single_module=bool(d.get("single_module", False)),
         )
 
 
@@ -155,8 +161,9 @@ def derive(
     """The draft, or None with the refusals that stopped it. Findings come back either way."""
     pyproject = scope.read_pyproject(repo)
     name = scope.repo_name(url)
+    names = (scope.project_name(repo, pyproject), name)
     chosen, refusal = scope.choose_package(
-        scope.find_packages(repo), (scope.project_name(repo, pyproject), name), package_override
+        scope.find_packages(repo, names), names, package_override
     )
     findings = scope.judge(repo, pyproject, chosen)
     if refusal is not None:
@@ -185,6 +192,7 @@ def derive(
             )
         )
     prefix = "" if root == "." else f"{root}/"
+    single = not (repo / root / package).is_dir()
     full = scope.full_suite(repo, root, package, scope.pytest_testpaths(repo, pyproject))
     deny = [f"{d}/**" for d in DENY_DIRS if (repo / d).is_dir()]
     if full == f"{prefix}{package}":
@@ -197,19 +205,21 @@ def derive(
         package_root=root,
         pip=pip,
         tests_full=full,
-        allow=(f"{prefix}{package}/**",),
+        allow=(f"{prefix}{package}.py",) if single else (f"{prefix}{package}/**",),
         deny=tuple(deny),
         run_id=f"{name}_w{template_width}",
         template=template,
         benchmarks=benchmark_sources(repo),
         findings=tuple(findings),
+        single_module=single,
     )
     return draft, findings
 
 
 def _largest_modules(repo: Path, draft: Draft) -> list[tuple[str, int]]:
     rows: list[tuple[str, int]] = []
-    for p in (repo / draft.package_dir).rglob("*.py"):
+    target = repo / draft.package_dir
+    for p in [target] if draft.single_module else target.rglob("*.py"):
         try:
             rows.append((str(p.relative_to(repo)), len(p.read_text(errors="replace").splitlines())))
         except OSError:
@@ -227,7 +237,12 @@ def brief(repo: Path, draft: Draft) -> str:
         "",
         "## Derived from the tree",
         "",
-        f"- package `{draft.package}`, imported by path from `{draft.package_root}`",
+        (
+            f"- single module `{draft.package_dir}`, imported as `{draft.package}` by path "
+            f"from `{draft.package_root}`"
+            if draft.single_module
+            else f"- package `{draft.package}`, imported by path from `{draft.package_root}`"
+        ),
         f"- dependencies installed in the box: {', '.join(draft.pip) or 'none found'}",
         f"- whole test suite: `{draft.tests_full}`",
         f"- a patch may change: {', '.join(draft.allow)}; never: {', '.join(draft.deny) or 'n/a'}",
@@ -253,7 +268,12 @@ def brief(repo: Path, draft: Draft) -> str:
     ]
     lines += ["", "## Benchmark sources in the repository", ""]
     lines += [f"- `{b}`" for b in draft.benchmarks] or ["- none found"]
-    lines += ["", "## Largest modules in the package, by lines", ""]
+    heading = (
+        "The module, by lines"
+        if draft.single_module
+        else "Largest modules in the package, by lines"
+    )
+    lines += ["", f"## {heading}", ""]
     lines += [f"- `{path}` {n}" for path, n in _largest_modules(repo, draft)]
     lines += [
         "",

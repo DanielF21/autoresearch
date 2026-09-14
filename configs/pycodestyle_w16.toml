@@ -1,0 +1,179 @@
+# pycodestyle: written by autoresearch intake propose at 2026-09-13 20:17:22.
+# Run `autoresearch next configs/pycodestyle_w16.toml` for the step it is at.
+#
+# input axis: source shape from many small standalone logical lines to multiline, token-
+#             dense, string-heavy constructs
+# why it matters: pycodestyle spends time in both repeated per-logical-line work (blank-
+#                 line bookkeeping, indentation, operator/comment regex scans) and per-
+#                 token or per-physical-line work (continued indentation, escape
+#                 scanning, multiline string handling). A patch that speeds up many
+#                 small logical lines may add overhead on larger token streams, and vice
+#                 versa, so the inputs are balanced in physical size but spread across
+#                 those distinct code paths.
+
+[run]
+run_id = "pycodestyle_w16"
+width = 16
+rounds = 16
+
+[target]
+name = "pycodestyle"
+repo = "https://github.com/PyCQA/pycodestyle"
+sha = "d6c38543a95c3adec7958fc659f4081972a3f1d1"
+package = "pycodestyle"
+alias = "pycodestyle"
+package_root = "."
+hot_file = "pycodestyle.py"
+call = "style.input_file('bench.py', lines=source)"
+pip = ["covdefaults", "coverage"]
+allow = ["pycodestyle.py"]
+deny = ["tests/**", "docs/**"]
+fingerprint = ""
+docs = ["configs/docs/pycodestyle_w16/profile_inputs.txt", "configs/docs/pycodestyle_w16/profile_many_functions_flat.txt", "configs/docs/pycodestyle_w16/profile_many_functions_callers.txt"]
+
+[target.tests]
+module = "tests"
+full = "tests"
+
+# regime: many small top-level function definitions with blank-line separation
+# why: Exercises tokenization and physical-line checks plus blank_lines/indentation
+#      logic over many short logical lines.
+[[target.inputs]]
+name = "many_functions"
+noise_floor = 1.0246   # calibrated 20260913-210422, 42 null pairs
+setup = '''
+pycodestyle.USER_CONFIG = None
+pycodestyle.PROJECT_CONFIG = ()
+style = pycodestyle.StyleGuide(reporter=pycodestyle.BaseReport, paths=[])
+rows = []
+for i in range(2000):
+    rows.extend(['def function_%d(value):' % i,
+                '    return value + %d' % i])
+    if i + 1 < 2000:
+        rows.extend(['', ''])
+source = [row + chr(10) for row in rows]
+'''
+
+# regime: many single-line arithmetic assignment statements
+# why: Exercises operator spacing checks (whitespace_around_operator and
+#      missing_whitespace) on many short logical lines.
+[[target.inputs]]
+name = "many_assignments"
+noise_floor = 1.0201   # calibrated 20260913-210422, 42 null pairs
+setup = '''
+pycodestyle.USER_CONFIG = None
+pycodestyle.PROJECT_CONFIG = ()
+style = pycodestyle.StyleGuide(reporter=pycodestyle.BaseReport, paths=[])
+rows = []
+for i in range(8000):
+    rows.append('v_%d = a_%d + b_%d * c_%d - d_%d / e_%d ** f_%d' % (i, i, i, i, i, i, i))
+source = [row + chr(10) for row in rows]
+'''
+
+# regime: multiline function calls spanning several continuation lines
+# why: Exercises continued_indentation, bracket bookkeeping,
+#      whitespace_before_parameters, and build_tokens_line over longer token streams.
+[[target.inputs]]
+name = "dense_continuations"
+noise_floor = 1.0120   # calibrated 20260913-210422, 42 null pairs
+setup = '''
+pycodestyle.USER_CONFIG = None
+pycodestyle.PROJECT_CONFIG = ()
+style = pycodestyle.StyleGuide(reporter=pycodestyle.BaseReport, paths=[])
+rows = []
+for i in range(500):
+    rows.append('def wrap_%d(data):' % i)
+    rows.append('    result = compute_%d(' % i)
+    for j in range(10):
+        rows.append('        argument_%d_%d,' % (i, j))
+    rows.append('    )')
+    rows.append('    return result')
+    if i + 1 < 500:
+        rows.extend(['', ''])
+source = [row + chr(10) for row in rows]
+'''
+
+# regime: many single-line statements with inline comments
+# why: Exercises whitespace_before_comment and build_tokens_line's comment-token
+#      collection path.
+[[target.inputs]]
+name = "inline_comments"
+noise_floor = 1.0151   # calibrated 20260913-210422, 42 null pairs
+setup = '''
+pycodestyle.USER_CONFIG = None
+pycodestyle.PROJECT_CONFIG = ()
+style = pycodestyle.StyleGuide(reporter=pycodestyle.BaseReport, paths=[])
+rows = []
+for i in range(8000):
+    rows.append('value_%d = %d  # Store item %d' % (i, i, i))
+source = [row + chr(10) for row in rows]
+'''
+
+# regime: many string literals containing backslash escapes
+# why: Exercises python_3000_invalid_escape_sequence scanning inside string tokens and
+#      mute_string in build_tokens_line.
+[[target.inputs]]
+name = "invalid_escape_strings"
+noise_floor = 1.0110   # calibrated 20260913-210422, 42 null pairs
+setup = '''
+pycodestyle.USER_CONFIG = None
+pycodestyle.PROJECT_CONFIG = ()
+style = pycodestyle.StyleGuide(reporter=pycodestyle.BaseReport, paths=[])
+rows = []
+for i in range(8000):
+    rows.append(('pattern_%d = ' + chr(39) + chr(92) + 'd+' + chr(39)) % i)
+source = [row + chr(10) for row in rows]
+'''
+
+# regime: functions with triple-quoted multiline docstrings
+# why: Exercises maybe_check_physical's multiline-string line loop, physical checks
+#      inside strings, and docstring/token handling.
+[[target.inputs]]
+name = "multiline_docstrings"
+noise_floor = 1.0047   # calibrated 20260913-210422, 42 null pairs
+setup = '''
+pycodestyle.USER_CONFIG = None
+pycodestyle.PROJECT_CONFIG = ()
+style = pycodestyle.StyleGuide(reporter=pycodestyle.BaseReport, paths=[])
+rows = []
+for i in range(900):
+    rows.append('def document_%d(value):' % i)
+    rows.append(('    ' + chr(34) * 3 + 'Docstring for function %d.') % i)
+    rows.append('')
+    rows.append('    The quick brown fox jumps over the lazy dog.')
+    rows.append('    It should be styled with spaces and punctuation.')
+    rows.append('    ' + chr(34) * 3)
+    rows.append('    return value * %d' % i)
+    if i + 1 < 900:
+        rows.extend(['', ''])
+source = [row + chr(10) for row in rows]
+'''
+
+[worker]
+model = "deepseek/deepseek-v4-pro-0813"
+reasoning_effort = "high"
+completion_window = "asap"
+max_turns = 240
+max_seconds = 10800
+max_input_tokens = 24000000
+turn_timeout = 600
+
+[referee]
+pairs = 6
+repeats_per_launch = 7
+min_clean_pairs = 4
+hash_seeds = [0, 1, 2, 3, 4]
+
+[boxes]
+worker_size = "m"
+referee_size = "m"
+control_size = "s"
+disk_gib = 32
+
+[storage]
+volume = "autoresearch"
+mount = "/mnt/autoresearch"
+
+[observe]
+enabled = true
+session_prefix = ""

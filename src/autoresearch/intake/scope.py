@@ -145,22 +145,36 @@ def _normal(name: str) -> str:
     return re.sub(r"[-_.]+", "_", name).lower()
 
 
-def find_packages(repo: Path) -> list[tuple[str, str]]:
-    """``(package_root, package)`` for every package directory at ``.`` or ``src``."""
+def find_packages(repo: Path, names: tuple[str, ...] = ()) -> list[tuple[str, str]]:
+    """``(package_root, package)`` for every package directory at ``.`` or ``src``.
+
+    A single module ``<root>/<stem>.py`` counts too, but only when its stem is
+    one of ``names`` (the project's and the repository's), so setup.py,
+    conftest.py and noxfile.py are never candidates. A directory of the same
+    name takes precedence over such a module.
+    """
     found: list[tuple[str, str]] = []
+    modules: list[tuple[str, str]] = []
+    wanted = {_normal(n) for n in names if n}
     for root in (".", "src"):
         base = repo if root == "." else repo / root
         if not base.is_dir():
             continue
         for child in sorted(base.iterdir()):
-            if (
-                child.is_dir()
-                and child.name.isidentifier()
-                and child.name not in NOT_PACKAGES
-                and (child / "__init__.py").is_file()
-            ):
+            if child.name in NOT_PACKAGES:
+                continue
+            if child.is_dir() and child.name.isidentifier() and (child / "__init__.py").is_file():
                 found.append((root, child.name))
-    return found
+            elif (
+                child.is_file()
+                and child.suffix == ".py"
+                and child.stem.isidentifier()
+                and child.stem not in NOT_PACKAGES
+                and _normal(child.stem) in wanted
+            ):
+                modules.append((root, child.stem))
+    taken = {p for _, p in found}
+    return found + [m for m in modules if m[1] not in taken]
 
 
 def choose_package(
@@ -177,8 +191,9 @@ def choose_package(
         return None, Finding(
             "package",
             "refuse",
-            "no package directory with an __init__.py at the root or under src/; "
-            "the harness imports by path from one of those",
+            "no package directory with an __init__.py at the root or under src/, "
+            "or a single module named after the project; the harness imports by path "
+            "from one of those",
         )
     if len(candidates) == 1:
         return candidates[0], None
@@ -294,6 +309,8 @@ def judge(repo: Path, pyproject: dict[str, Any], package: tuple[str, str] | None
         return out
     root, name = package
     pkg = repo / root / name
+    if not pkg.is_dir():
+        pkg = pkg.with_suffix(".py")  # a single module; rglob over a file yields nothing
     compiled = sorted(
         str(p.relative_to(repo)) for p in pkg.rglob("*") if p.suffix in COMPILED_SUFFIXES
     )
@@ -318,7 +335,7 @@ def judge(repo: Path, pyproject: dict[str, Any], package: tuple[str, str] | None
         )
 
     threaded: list[str] = []
-    for p in sorted(pkg.rglob("*.py")):
+    for p in [pkg] if pkg.is_file() else sorted(pkg.rglob("*.py")):
         try:
             if THREAD_IMPORT.search(p.read_text(errors="replace")):
                 threaded.append(str(p.relative_to(repo)))

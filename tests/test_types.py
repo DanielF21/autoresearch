@@ -185,6 +185,92 @@ def test_clears_noise_requires_every_condition() -> None:
     assert not replace(good, inputs=(_input("dense", 1.02), odd)).clears_noise
     blank = replace(_input("sparse", 1.02), patched_fp="")
     assert replace(good, inputs=(_input("dense", 1.02), blank)).result_matches is None
+    # A cached result on repeated calls is named and never a real speedup.
+    cached = replace(_input("sparse", 400.0), memoized=True)
+    flagged = replace(good, inputs=(_input("dense", 1.02), cached))
+    assert flagged.memoized == ("sparse",) and not flagged.clears_noise
+    assert Measurement.from_dict(flagged.to_dict()) == flagged
+    assert flagged.to_dict()["memoized"] == ["sparse"]
+    # A record from before the flag existed reads as not memoized.
+    old_input = _input("sparse", 1.02).to_dict()
+    del old_input["memoized"]
+    assert InputTiming.from_dict(old_input).memoized is False
+
+
+def test_a_patch_that_recognises_the_shown_instance_is_overfit_not_a_speedup() -> None:
+    """pycodestyle_p3_w16 attempt 0233: 2985x on the six instances the worker was
+    shown, by string equality against their regenerated text. The score is the
+    held out instance's ratio; the shown one is kept beside it, and the flag
+    keeps the attempt out of the leader set."""
+    good = Measurement(
+        applied=True,
+        tests=(_suite("module"), _suite("full")),
+        inputs=(_input("dense", 1.02), _input("sparse", 1.02)),
+    )
+    recognised = replace(
+        _input("sparse", 1.0),
+        seed=123456789,
+        shown_pairs=(_pair(0, 1.0, 1 / 2985.0),),
+        shown_speedup=2985.0,
+        held_out_base_fp="h",
+        held_out_patched_fp="h",
+        overfit=True,
+    )
+    flagged = replace(good, inputs=(_input("dense", 1.02), recognised))
+    assert flagged.overfit == ("sparse",) and not flagged.clears_noise
+    assert flagged.speedup == pytest.approx(math.sqrt(1.02))  # the held out ratios
+    assert Measurement.from_dict(flagged.to_dict()) == flagged
+    assert flagged.to_dict()["overfit"] == ["sparse"]
+    assert flagged.to_dict()["inputs"][1]["shown_speedup"] == 2985.0
+    # A record from before the held out timing reads as a shown only score.
+    old_input = _input("sparse", 1.02).to_dict()
+    for key in ("overfit", "seed", "shown_pairs", "shown_speedup", "held_out_base_fp"):
+        del old_input[key]
+    old = InputTiming.from_dict(old_input)
+    assert old.overfit is False and old.seed == 0 and old.shown_pairs == ()
+    assert old.result_matches is True
+
+
+def test_result_matches_covers_the_held_out_instance_when_it_was_verified() -> None:
+    """A patch right on seed 0 and wrong on the seed it never saw computed the
+    wrong thing. An older record with no held out fingerprints compares the
+    shown ones alone."""
+    shown_only = _input("a", 1.02)
+    assert shown_only.result_matches is True
+    both = replace(shown_only, held_out_base_fp="h1", held_out_patched_fp="h1")
+    assert both.result_matches is True
+    wrong_held_out = replace(shown_only, held_out_base_fp="h1", held_out_patched_fp="h2")
+    assert wrong_held_out.result_matches is False
+    wrong_shown = replace(both, patched_fp="b")
+    assert wrong_shown.result_matches is False
+    assert replace(shown_only, patched_fp="").result_matches is None
+    # A held out verify that failed on one tree leaves one side blank: not a match.
+    assert replace(shown_only, held_out_base_fp="h1").result_matches is False
+
+
+def test_a_failed_suite_names_its_tests_and_an_old_record_has_none() -> None:
+    tail = (
+        "=== short test summary info ===\n"
+        "FAILED tests/test_unit.py::test_dates - AssertionError: 2026\n"
+        "ERROR tests/test_io.py::test_read\n"
+        "1 failed, 1 error, 2135 passed in 21s\n"
+    )
+    broken = replace(_suite("full", ok=False), failures=tail)
+    assert broken.failed_tests == ("tests/test_unit.py::test_dates", "tests/test_io.py::test_read")
+    assert SuiteResult.from_dict(broken.to_dict()) == broken
+    old = _suite("full").to_dict()
+    del old["failures"]
+    assert (
+        SuiteResult.from_dict(old).failures == "" and SuiteResult.from_dict(old).failed_tests == ()
+    )
+
+
+def test_a_pair_records_which_instance_it_timed() -> None:
+    held_out = replace(_pair(0, 2.0, 1.0), seed=987654321)
+    assert PairTiming.from_dict(held_out.to_dict()) == held_out
+    old = _pair(0, 2.0, 1.0).to_dict()
+    del old["seed"]
+    assert PairTiming.from_dict(old).seed == 0
 
 
 def test_a_patch_slower_on_any_input_is_not_a_real_speedup() -> None:

@@ -150,3 +150,34 @@ def test_lock_refuses_a_second_orchestrator(tmp_path: Path) -> None:
         acquire_lock(paths)
     release_lock(paths)
     acquire_lock(paths)
+
+
+def test_leader_set_is_the_best_and_the_patches_that_overlap_it() -> None:
+    from autoresearch.history import leader_set
+    from autoresearch.types import Attempt
+    from tests.helpers import diff_with
+
+    def att(n: int, added: tuple[str, ...] | None, ratio: float, ok: bool = True) -> Attempt:
+        m = Measurement(
+            applied=True,
+            tests=(SuiteResult("module", 1, 0, 0, 1, ok), SuiteResult("full", 1, 0, 0, 1, ok)),
+            inputs=(_timing(ratio),),
+        )
+        patch = diff_with(added) if added is not None else None
+        return Attempt(
+            AttemptRef(n, n, 0), "s", patch, None, "", StopReason.SUBMITTED, Usage(), 1.0, m
+        )
+
+    history = (
+        att(1, ("a = 1",), 1.05),  # disjoint from the best: stays visible
+        att(2, ("b = 2", "c = 3", "g = 7"), 1.10),  # the best
+        att(3, ("b = 2", "d = 4"), 1.30, ok=False),  # failed copy, 1 of its 2 lines: hidden
+        att(4, ("b = 2", "e = 5", "f = 6"), 1.06),  # one line of three: visible
+        att(5, None, 1.0),  # no patch
+    )
+    assert leader_set(history) == frozenset({2, 3})
+    assert leader_set(()) == frozenset()
+    # Nothing cleared the floor: nothing to hide.
+    assert leader_set((att(1, ("a = 1",), 1.001),)) == frozenset()
+    # A best whose patch adds nothing hides only itself.
+    assert leader_set((att(1, (), 1.05), att(2, ("z = 1",), 1.02))) == frozenset({1})

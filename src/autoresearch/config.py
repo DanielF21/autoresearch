@@ -14,12 +14,17 @@ target lives in code. See ``TargetSpec``.
 from __future__ import annotations
 
 import hashlib
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 BOX_SIZES = ("s", "m", "l")
+# The name a setup reads to build one instance of its input. The guest binds
+# it beside ROOT and the alias; the referee times a value the worker never saw.
+SEED_NAME = "SEED"
+_SEED_TOKEN = re.compile(rf"\b{SEED_NAME}\b")
 
 # How a [target] written before 2026-09-12 is read. Those configs had no
 # ``package`` key, spelled an input as one expression bound to ``G`` with the
@@ -62,6 +67,13 @@ class BenchmarkInput:
     name: str
     setup: str
     noise_floor: float | None
+
+    @property
+    def seeded(self) -> bool:
+        """Whether the setup reads ``SEED``, so the referee can build an instance
+        the worker was not shown. A setup that ignores it is one point, and a
+        patch can recognise one point."""
+        return _SEED_TOKEN.search(self.setup) is not None
 
     def to_dict(self) -> dict[str, Any]:
         return {"name": self.name, "setup": self.setup, "noise_floor": self.noise_floor}
@@ -115,7 +127,6 @@ class TargetSpec:
     deny: tuple[str, ...]
     pip: tuple[str, ...] = ()
     apt: tuple[str, ...] = ()
-    fingerprint: str = ""
     docs: tuple[str, ...] = ()
 
     @property
@@ -127,6 +138,13 @@ class TargetSpec:
     def uncalibrated(self) -> tuple[str, ...]:
         """Names of inputs with no noise floor yet. Empty is what a run needs."""
         return tuple(i.name for i in self.inputs if i.noise_floor is None)
+
+    @property
+    def unseeded(self) -> tuple[str, ...]:
+        """Names of inputs whose setup does not read ``SEED``. Empty is what a
+        measurement needs; a config from before the held out timing has all of
+        its inputs here and stays readable, but cannot be measured."""
+        return tuple(i.name for i in self.inputs if not i.seeded)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -144,7 +162,6 @@ class TargetSpec:
             "deny": list(self.deny),
             "pip": list(self.pip),
             "apt": list(self.apt),
-            "fingerprint": self.fingerprint,
             "docs": list(self.docs),
         }
 
@@ -162,6 +179,14 @@ class WorkerConfig:
     # One name means every worker is told the same thing, which is every run
     # before the four prompt experiment.
     prompts: tuple[str, ...] = ("v1",)
+    # The hidden leader experiment: the top ``hidden_slots`` slots of every round
+    # are not shown the best attempt so far nor the attempts whose patches
+    # overlap it (``history.leader_set``), in the index and on disk alike. Zero,
+    # the default, is every run before it.
+    hidden_slots: int = 0
+    # Whether the first message carries the history index table. Off, the
+    # worker learns the history from the directory alone.
+    history_index: bool = True
 
 
 @dataclass(frozen=True)
@@ -276,6 +301,29 @@ def _prompt_versions(worker: dict[str, Any]) -> tuple[str, ...]:
     return tuple(raw)
 
 
+def _hidden_slots(worker: dict[str, Any], width: int) -> int:
+    """``[worker].hidden_slots``: absent means none. Bounded by the width, since a
+    slot that does not exist cannot be hidden."""
+    raw = worker.get("hidden_slots", 0)
+    if isinstance(raw, bool) or not isinstance(raw, int) or not 0 <= raw <= width:
+        raise ConfigError("[worker].hidden_slots must be an integer between 0 and run.width")
+    return raw
+
+
+def _history_index(worker: dict[str, Any], prompts: tuple[str, ...]) -> bool:
+    """``[worker].history_index``: absent means the table is rendered. v0 is
+    verbatim text that says the table is there, so it cannot run without it."""
+    raw = worker.get("history_index", True)
+    if not isinstance(raw, bool):
+        raise ConfigError("[worker].history_index must be true or false")
+    if not raw and "v0" in prompts:
+        raise ConfigError(
+            "[worker].history_index = false cannot be combined with prompt v0, whose text "
+            "tells the worker the history table is in the first message"
+        )
+    return raw
+
+
 def _str_list(section: dict[str, Any], name: str, key: str) -> tuple[str, ...]:
     value = _require(section, name, key)
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
@@ -360,7 +408,6 @@ def _target(target: dict[str, Any]) -> TargetSpec:
         package_root = str(LEGACY_NETWORKX_TARGET["package_root"])
         pip = tuple(LEGACY_NETWORKX_TARGET["pip"])
         apt: tuple[str, ...] = ()
-        fingerprint = ""
     else:
         if "test_file" in target:
             raise ConfigError("[target].test_file moved to [target.tests].module")
@@ -373,7 +420,8 @@ def _target(target: dict[str, Any]) -> TargetSpec:
             raise ConfigError("[target].package_root must be a non empty relative path")
         pip = _optional_str_list(target, "target", "pip")
         apt = _optional_str_list(target, "target", "apt")
-        fingerprint = str(target.get("fingerprint", ""))
+        # ``fingerprint`` was an expression that reduced the result before hashing.
+        # The whole result is hashed now; the key in an older config is ignored.
     if not alias.isidentifier():
         raise ConfigError(f"[target].alias must be a Python identifier, got {alias!r}")
     return TargetSpec(
@@ -391,7 +439,6 @@ def _target(target: dict[str, Any]) -> TargetSpec:
         deny=_str_list(target, "target", "deny"),
         pip=pip,
         apt=apt,
-        fingerprint=fingerprint,
         docs=_optional_str_list(target, "target", "docs"),
     )
 
@@ -429,9 +476,11 @@ def parse_config(text: str) -> RunConfig:
     ):
         raise ConfigError("[referee].hash_seeds must be a non empty list of integers")
 
+    width = _positive_int(run, "run", "width")
+    prompts = _prompt_versions(worker)
     return RunConfig(
         run_id=_str(run, "run", "run_id"),
-        width=_positive_int(run, "run", "width"),
+        width=width,
         rounds=_positive_int(run, "run", "rounds"),
         target=_target(target),
         worker=WorkerConfig(
@@ -442,7 +491,9 @@ def parse_config(text: str) -> RunConfig:
             max_seconds=_positive_int(worker, "worker", "max_seconds"),
             max_input_tokens=_positive_int(worker, "worker", "max_input_tokens"),
             turn_timeout=_positive_int(worker, "worker", "turn_timeout"),
-            prompts=_prompt_versions(worker),
+            prompts=prompts,
+            hidden_slots=_hidden_slots(worker, width),
+            history_index=_history_index(worker, prompts),
         ),
         referee=RefereeConfig(
             pairs=pairs,

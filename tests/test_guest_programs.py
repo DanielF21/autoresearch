@@ -70,6 +70,7 @@ def _target(root: Path, package_root: str = ".", **overrides: str) -> list[str]:
         "--setup": "items = fp.make(500)",
         "--call": "fp.compute(items)",
         "--hot": f"{package_root}/fakepkg/hot.py" if package_root != "." else "fakepkg/hot.py",
+        "--seed": "0",
     }
     flags.update(overrides)
     return [x for pair in flags.items() for x in pair]
@@ -83,6 +84,12 @@ def test_time_target_run_mode(fake_tree: Path) -> None:
     assert isinstance(out["min_all"], float)
     assert out["min_clean"] == out["min_all"]
     assert out["n_contaminated"] == 0
+    # The first call is reported apart from the best of the rest.
+    assert isinstance(out["first_s"], float) and isinstance(out["warm_s"], float)
+    assert out["min_all"] == min(out["first_s"], out["warm_s"])
+    # The walk over the result is inside the region and reported apart.
+    assert isinstance(out["walk_s"], float) and 0 <= out["walk_s"] <= out["min_all"]
+    assert out["seed"] == 0
     assert len(str(out["result_fp"])) == 10
     assert isinstance(out["import_s"], float) and isinstance(out["setup_s"], float)
     assert out["python"] == list(sys.version_info[:3])
@@ -160,11 +167,24 @@ def test_time_target_refuses_a_call_that_returns_an_iterator(fake_tree: Path) ->
     assert out["_rc"] == 3 and "iterator" in str(out["error"])
 
 
-def test_time_target_fingerprint_expression_reduces_the_result(fake_tree: Path) -> None:
-    args = _target(fake_tree, **{"--fingerprint": "len(result)"})
+def test_time_target_hashes_the_whole_result_and_takes_no_expression(fake_tree: Path) -> None:
+    """pyparsing's seeded config once fingerprinted the first 20 and last 5 tokens of
+    a 10 000 token parse; a wrong middle would have matched. Every element counts."""
+    args = _target(fake_tree)
     out = _run("time_target.py", *args, "--repeats", "1", "--no-counters")
     assert out["_rc"] == 0
-    assert out["result_fp"] == time_target.fingerprint(500)
+    whole = {i: (i * 31) % 7 for i in range(500)}
+    assert out["result_fp"] == time_target.fingerprint(whole)
+    # The hash of a slice, the way a fingerprint expression used to reduce it.
+    edges = dict(list(whole.items())[:20] + list(whole.items())[-5:])
+    assert out["result_fp"] != time_target.fingerprint(edges)
+    proc = subprocess.run(
+        [sys.executable, str(GUEST / "time_target.py"), *args, "--fingerprint", "len(result)"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 2 and "--fingerprint" in proc.stderr
 
 
 def test_time_target_has_no_defaults_for_the_target() -> None:
@@ -176,8 +196,76 @@ def test_time_target_has_no_defaults_for_the_target() -> None:
         check=False,
     )
     assert proc.returncode == 2
-    for flag in ("--package", "--alias", "--package-root", "--setup", "--call", "--hot"):
+    for flag in ("--package", "--alias", "--package-root", "--setup", "--call", "--hot", "--seed"):
         assert flag in proc.stderr
+
+
+def test_time_target_binds_the_seed_and_the_instance_follows_it(fake_tree: Path) -> None:
+    """SEED is the harness's handle on which instance of an input the setup builds.
+    The referee times a seed the worker was never shown, so the setup has to
+    read it and the result has to change with it."""
+    args = _target(fake_tree, **{"--setup": "items = fp.make(500 + SEED)"})
+    at_zero = _run("time_target.py", *args, "--repeats", "1", "--no-counters")
+    at_seven = _run("time_target.py", *args[:-2], "--seed", "7", "--repeats", "1", "--no-counters")
+    assert at_zero["_rc"] == 0 and at_seven["_rc"] == 0
+    assert at_zero["seed"] == 0 and at_seven["seed"] == 7
+    assert at_zero["result_fp"] != at_seven["result_fp"]
+    assert at_seven["result_fp"] == time_target.fingerprint({i: (i * 31) % 7 for i in range(507)})
+    verify = _run("time_target.py", *args[:-2], "--seed", "7", "--verify")
+    assert verify["result_fp"] == at_seven["result_fp"]
+
+
+def test_a_lazy_result_is_paid_inside_the_timed_region(fake_tree: Path) -> None:
+    """pyparsing_p3_w16 from round 14 returned list subclasses that did the
+    split when first read, after the clock had stopped. The walk over the
+    result runs before it stops, so the deferred work is timed."""
+    (fake_tree / "fakepkg" / "lazy.py").write_text(
+        "import time\n\n"
+        "class Lazy(list):\n"
+        "    def __init__(self):\n"
+        "        super().__init__()\n"
+        "        self.done = False\n"
+        "    def _fill(self):\n"
+        "        if not self.done:\n"
+        "            time.sleep(0.05)\n"
+        "            self.extend(range(3))\n"
+        "            self.done = True\n"
+        "    def __iter__(self):\n"
+        "        self._fill()\n"
+        "        return super().__iter__()\n"
+        "    def __len__(self):\n"
+        "        self._fill()\n"
+        "        return super().__len__()\n\n"
+        "def defer(items):\n"
+        "    return Lazy()\n"
+    )
+    args = _target(
+        fake_tree, **{"--setup": "from fakepkg import lazy", "--call": "lazy.defer(None)"}
+    )
+    out = _run("time_target.py", *args, "--repeats", "2", "--no-counters")
+    assert out["_rc"] == 0, out
+    assert float(str(out["min_all"])) > 0.05
+    assert float(str(out["walk_s"])) > 0.04
+    assert out["result_fp"] == time_target.fingerprint([0, 1, 2])
+
+
+def test_materialize_walks_what_the_fingerprint_renders() -> None:
+    seen: list[str] = []
+
+    class Arr:
+        def tolist(self) -> list[int]:
+            seen.append("tolist")
+            return [1, 2]
+
+    class Opaque:
+        def __repr__(self) -> str:
+            seen.append("repr")
+            return "opaque"
+
+    time_target.materialize({"a": [Arr(), {1, 2}], "b": (Opaque(), None, 1.5, b"x")})
+    assert seen == ["tolist", "repr"]
+    with pytest.raises(time_target.UnfingerprintableError, match="iterator"):
+        time_target.materialize([1, (i for i in range(2))])
 
 
 def test_fingerprint_depends_on_content_not_on_order_or_identity() -> None:
@@ -190,6 +278,32 @@ def test_fingerprint_depends_on_content_not_on_order_or_identity() -> None:
     assert fp("ab") != fp(["a", "b"])
     assert len({fp(None), fp(0), fp(False), fp("")}) == 4  # each renders as itself
     assert time_target.canonical(True) == "True" and time_target.canonical(1) == "1"
+
+
+def test_a_value_that_is_both_mapping_and_sequence_renders_as_both() -> None:
+    """pyparsing's ParseResults registers as MutableMapping and MutableSequence. Its
+    named results are usually empty and its tokens are the answer; rendering the
+    mapping alone hashed every parse as "{}", the same at every seed."""
+    from collections.abc import MutableMapping, MutableSequence
+
+    class Both(list):  # type: ignore[type-arg]
+        def items(self) -> list[tuple[str, int]]:
+            return []
+
+    MutableMapping.register(Both)
+    MutableSequence.register(Both)
+    fp = time_target.fingerprint
+    assert fp(Both([1, 2, 3])) != fp(Both([1, 2, 4]))
+    assert fp(Both([1, 2, 3])) != fp({})
+    seen: list[int] = []
+
+    class Lazy(Both):
+        def __iter__(self):  # type: ignore[no-untyped-def]
+            seen.append(1)
+            return super().__iter__()
+
+    time_target.materialize(Lazy([1, 2, 3]))
+    assert seen == [1]
 
 
 def test_fingerprint_reads_array_like_results_through_tolist() -> None:
@@ -253,6 +367,37 @@ def test_run_tests_end_to_end(tmp_path: Path) -> None:
     assert out["passed"] == 1
     assert out["failed"] == 1
     assert log.exists() and "test_bad" in log.read_text()
+
+
+def test_run_tests_keeps_a_file_in_order_on_one_worker(tmp_path: Path) -> None:
+    """A test that leans on what an earlier test in its file left behind must
+    not pass or fail by which xdist worker drew it. pyparsing's
+    testIndentedBlockClass2 did exactly that under the default distribution."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    # Each file's second test reads a mark its first test wrote into the file's
+    # own directory: split across workers, the second can run first and fail.
+    for n in range(6):
+        (root / f"test_{n}.py").write_text(
+            "import pathlib\n"
+            f"MARK = pathlib.Path(__file__).parent / 'mark_{n}'\n"
+            "def test_first():\n    MARK.write_text('x')\n"
+            "def test_second():\n    assert MARK.exists()\n"
+        )
+    out = _run(
+        "run_tests.py",
+        "--root",
+        str(root),
+        "--target",
+        ".",
+        "--scope",
+        "full",
+        "--workers",
+        "4",
+        "--log",
+        str(tmp_path / "tests.log"),
+    )
+    assert out["ok"] is True and out["passed"] == 12, out["tail"]
 
 
 def test_run_tests_imports_the_package_from_its_package_root(
@@ -354,3 +499,29 @@ def test_apply_patch_worktree_lifecycle(tmp_path: Path) -> None:
     out = _run("apply_patch.py", "--repo", str(repo), "--worktree", str(wt), "--remove")
     assert out["ok"] is True
     assert not wt.exists()
+
+
+def test_time_target_rebuilds_the_input_before_every_call(fake_tree: Path) -> None:
+    """A result cached on the input object must never be hit: setup runs again
+    before each timed call, in a fresh namespace, and only the call is timed."""
+    marker = fake_tree / "setups"
+    setup = (
+        f"import pathlib; pathlib.Path({str(marker)!r}).open('a').write('x'); items = fp.make(500)"
+    )
+    out = _run(
+        "time_target.py",
+        *_target(fake_tree, **{"--setup": setup}),
+        "--repeats",
+        "4",
+        "--no-counters",
+    )
+    assert out["_rc"] == 0 and out["repeats"] == 4
+    assert marker.read_text() == "xxxx"
+    one = _run(
+        "time_target.py",
+        *_target(fake_tree, **{"--setup": setup}),
+        "--repeats",
+        "1",
+        "--no-counters",
+    )
+    assert one["_rc"] == 0 and one["warm_s"] is None

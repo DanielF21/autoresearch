@@ -43,7 +43,7 @@ def test_pilot_config_loads() -> None:
     assert cfg.target.tests == SuitePaths(
         module="networkx/algorithms/tests/test_cluster.py", full="networkx"
     )
-    assert cfg.target.fingerprint == ""
+    assert not hasattr(cfg.target, "fingerprint")
     assert cfg.worker.model.startswith("deepseek/")
     assert cfg.run_dir == Path("/mnt/autoresearch/runs/t1_w4d")
     assert len(cfg.config_hash) == 12
@@ -59,7 +59,11 @@ def test_a_legacy_config_reads_as_the_same_target() -> None:
     """
     legacy = load_config(CONFIGS / "t1_w4c.toml").target
     new = load_config(PILOT).target
-    assert legacy == new
+    # The one thing the pilot config has that a legacy one cannot: its setups read
+    # SEED, so the referee can time an instance the worker was not shown.
+    assert new.unseeded == () and legacy.unseeded == tuple(i.name for i in legacy.inputs)
+    one_instance = tuple(replace(i, setup=i.setup.replace(" + SEED", "")) for i in new.inputs)
+    assert legacy == replace(new, inputs=one_instance)
     assert legacy.package == LEGACY_NETWORKX_TARGET["package"]
     assert legacy.inputs[0].setup == "G = nx.erdos_renyi_graph(1000, 0.05, seed=42, directed=True)"
     # Every old config, not only the one whose run is resumable.
@@ -113,15 +117,38 @@ def test_timing_retries_is_read_and_validated() -> None:
 def test_prompt_versions_default_to_v1_and_are_checked_by_name() -> None:
     assert load_config(PILOT).worker.prompts == ("v1",)
     text = PILOT.read_text().replace(
-        "max_turns = 80", 'max_turns = 80\nprompts = ["v1", "v2", "v3", "v4"]'
+        "turn_timeout = 600", 'turn_timeout = 600\nprompts = ["v1", "v2", "v3", "v4"]'
     )
     assert parse_config(text).worker.prompts == ("v1", "v2", "v3", "v4")
-    with pytest.raises(ConfigError, match=r"unknown versions \['v9'\]; known: \['v1'"):
+    with pytest.raises(ConfigError, match=r"unknown versions \['v9'\]; known: \['v0', 'v1'"):
         parse_config(text.replace('"v4"', '"v9"'))
     with pytest.raises(ConfigError, match="non empty list"):
         parse_config(text.replace('["v1", "v2", "v3", "v4"]', "[]"))
     four = load_config(CONFIGS / "t1_p3_w4.toml")
     assert four.worker.prompts == ("v1", "v2", "v3", "v4") and four.width == 4
+
+
+def _with_worker_keys(extra: str) -> str:
+    return PILOT.read_text().replace("turn_timeout = 600", "turn_timeout = 600\n" + extra)
+
+
+def test_hidden_slots_default_to_none_and_are_bounded_by_the_width() -> None:
+    cfg = load_config(PILOT)
+    assert cfg.worker.hidden_slots == 0 and cfg.worker.history_index is True
+    assert parse_config(_with_worker_keys("hidden_slots = 2")).worker.hidden_slots == 2
+    assert parse_config(_with_worker_keys("hidden_slots = 4")).worker.hidden_slots == 4
+    for bad in ("hidden_slots = 5", "hidden_slots = -1", "hidden_slots = true"):
+        with pytest.raises(ConfigError, match=r"between 0 and run\.width"):
+            parse_config(_with_worker_keys(bad))
+
+
+def test_history_index_is_a_bool_and_v0_cannot_run_without_the_table() -> None:
+    assert parse_config(_with_worker_keys("history_index = false")).worker.history_index is False
+    with pytest.raises(ConfigError, match="true or false"):
+        parse_config(_with_worker_keys('history_index = "no"'))
+    with pytest.raises(ConfigError, match="prompt v0"):
+        parse_config(_with_worker_keys('history_index = false\nprompts = ["v0"]'))
+    assert parse_config(_with_worker_keys('prompts = ["v0"]')).worker.prompts == ("v0",)
 
 
 @pytest.mark.parametrize(
@@ -222,11 +249,12 @@ def test_optional_target_keys_default_to_empty() -> None:
     text = PILOT.read_text().replace('pip = ["numpy", "scipy", "pandas"]', "", 1)
     cfg = parse_config(text)
     assert cfg.target.pip == () and cfg.target.apt == ()
-    assert cfg.target.fingerprint == ""
+    # A fingerprint expression in a config written before the whole result was
+    # hashed is ignored, so every run's frozen config.toml still loads.
     withfp = PILOT.read_text().replace(
         "[target]\n", '[target]\nfingerprint = "sorted(result)"\n', 1
     )
-    assert parse_config(withfp).target.fingerprint == "sorted(result)"
+    assert parse_config(withfp).target == parse_config(PILOT.read_text()).target
 
 
 def test_target_spec_round_trips_to_a_dict_with_no_target_specific_keys() -> None:
@@ -245,7 +273,6 @@ def test_target_spec_round_trips_to_a_dict_with_no_target_specific_keys() -> Non
         deny=("tests/**",),
         pip=("dep",),
         apt=("libfoo",),
-        fingerprint="len(result)",
     )
     d = spec.to_dict()
     assert d["tests"] == {"module": "tests/test_hot.py", "full": "tests"}

@@ -43,7 +43,6 @@ class Proposal:
     hot_file: str
     alias: str
     call: str
-    fingerprint: str
     tests_module: str
     extra_pip: tuple[str, ...]
     axis: str
@@ -106,7 +105,6 @@ def target_spec(draft: Draft, proposal: Proposal) -> TargetSpec:
         deny=draft.deny,
         pip=pip_for(draft, proposal),
         apt=(),
-        fingerprint=proposal.fingerprint,
         docs=(),
     )
 
@@ -138,7 +136,6 @@ def render(draft: Draft, proposal: Proposal, template: RunConfig, when: str) -> 
         f"pip = {_list(t.pip)}",
         f"allow = {_list(t.allow)}",
         f"deny = {_list(t.deny)}",
-        f"fingerprint = {_s(t.fingerprint)}",
         "docs = []",
         "",
         "[target.tests]",

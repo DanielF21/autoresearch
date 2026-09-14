@@ -31,23 +31,36 @@ def parse_response(raw: dict[str, Any], latency_s: float) -> ModelResponse:
         raise ModelError(f"response has no message: {json.dumps(raw)[:500]}") from e
 
     calls: list[ToolCall] = []
+    echoed_calls: list[dict[str, Any]] = []
     for tc in message.get("tool_calls") or []:
         fn = tc.get("function", {})
         raw_args = fn.get("arguments") or "{}"
+        malformed = False
         try:
             args = json.loads(raw_args)
             if not isinstance(args, dict):
                 args = {"value": args}
         except json.JSONDecodeError:
             args = {}
+            malformed = True
         calls.append(
             ToolCall(
                 id=str(tc.get("id", "")),
                 name=str(fn.get("name", "")),
                 arguments=args,
                 raw_arguments=raw_args,
+                malformed=malformed,
             )
         )
+        # The echo carries the arguments as the harness read them. A call whose
+        # arguments were not JSON goes back as "{}": the endpoint refuses any
+        # later request whose history holds a tool call with invalid arguments
+        # ("messages[37].tool_calls[0].function.arguments must be valid JSON"),
+        # which ended pycodestyle's intake on 2026-09-14 after one cut off call.
+        echoed = dict(tc)
+        if malformed:
+            echoed["function"] = dict(fn, arguments="{}")
+        echoed_calls.append(echoed)
 
     u = raw.get("usage") or {}
     usage = Usage(
@@ -61,8 +74,8 @@ def parse_response(raw: dict[str, Any], latency_s: float) -> ModelResponse:
     echo: Message = {"role": "assistant", "content": message.get("content") or ""}
     if message.get("reasoning_content"):
         echo["reasoning_content"] = message["reasoning_content"]
-    if message.get("tool_calls"):
-        echo["tool_calls"] = message["tool_calls"]
+    if echoed_calls:
+        echo["tool_calls"] = echoed_calls
     return ModelResponse(
         content=str(message.get("content") or ""),
         reasoning=str(message.get("reasoning_content") or ""),

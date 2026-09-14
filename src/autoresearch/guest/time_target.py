@@ -6,16 +6,27 @@ outside the requested tree.
 
 Everything about the target comes from the flags; nothing is defaulted here.
 ``--setup`` is Python statements run once in a namespace holding the package
-under ``--alias`` and ``ROOT``, a ``pathlib.Path`` of the tree. ``--call`` is
-one expression evaluated in that namespace, and that is what is timed.
+under ``--alias``, ``ROOT``, a ``pathlib.Path`` of the tree, and ``SEED``, the
+integer from ``--seed`` that picks which instance of the input the setup
+builds. ``--call`` is one expression evaluated in that namespace, and that is
+what is timed.
+
+The timed region is the call and a walk over its result: every mapping item,
+set member, sequence element and array element is touched before the clock
+stops. A lazy container that does its work when first read is then paid where
+it is measured, the way a generator has to be wrapped in ``list()``. The walk
+is the fingerprint's own traversal without the rendering, and its cost is
+reported apart as ``walk_s``.
 
 The result is fingerprinted so both trees can be shown to compute the same
 thing. The fingerprint is a hash of a canonical rendering: mappings in key
 order, floats rounded, sets sorted, array like objects through ``tolist``. An
 object whose only rendering is an address cannot be compared across launches
 and is an error, as is a result that is an iterator, since timing a call that
-returns a generator times nothing. ``--fingerprint`` is an expression over
-``result`` for a target whose result needs its own reduction.
+returns a generator times nothing. The whole result is hashed, never a slice
+of it: pyparsing's seeded config once fingerprinted the first 20 and last 5
+tokens of a 10 000 token parse, and a patch that got the middle wrong would
+have passed as the same result.
 
 Modes:
 
@@ -68,7 +79,14 @@ def canonical(value: Any) -> str:
         return repr(round(value, FLOAT_PLACES))
     if isinstance(value, Mapping):
         items = sorted((canonical(k), canonical(v)) for k, v in value.items())
-        return "{" + ",".join(f"{k}:{v}" for k, v in items) + "}"
+        mapping = "{" + ",".join(f"{k}:{v}" for k, v in items) + "}"
+        # A value that is both a mapping and a sequence renders as both: pyparsing's
+        # ParseResults registers as each, and its named results are usually empty
+        # while its tokens are the whole answer. Rendering only the mapping hashed
+        # every parse as "{}" and no seed changed it.
+        if isinstance(value, Sequence):
+            return mapping + "[" + ",".join(canonical(v) for v in value) + "]"
+        return mapping
     if isinstance(value, Set):
         return "{" + ",".join(sorted(canonical(v) for v in value)) + "}"
     if isinstance(value, Sequence):
@@ -85,7 +103,7 @@ def canonical(value: Any) -> str:
     if " at 0x" in text:
         raise UnfingerprintableError(
             f"the result renders as an address ({text[:60]}), which no two launches "
-            "share; give the target a 'fingerprint' expression that reduces it"
+            "share; have the call return plain data such as lists, dicts, strings and numbers"
         )
     return text
 
@@ -93,6 +111,39 @@ def canonical(value: Any) -> str:
 def fingerprint(value: Any) -> str:
     """A short hash of the canonical rendering. Raises UnfingerprintableError."""
     return hashlib.md5(canonical(value).encode()).hexdigest()[:10]
+
+
+def materialize(value: Any) -> None:
+    """Touch every element ``canonical`` would render, building nothing.
+
+    Run inside the timed region, so a result that defers its work until it is
+    read pays for that work where it is measured. The traversal is the
+    fingerprint's, so what is forced here is exactly what is later compared. An
+    iterator is refused here for the reason it is refused there.
+    """
+    if value is None or isinstance(value, bool | int | float | str | bytes):
+        return
+    if isinstance(value, Mapping):
+        for k, v in value.items():
+            materialize(k)
+            materialize(v)
+        if not isinstance(value, Sequence):
+            return
+    if isinstance(value, Set | Sequence):
+        for v in value:
+            materialize(v)
+        return
+    if hasattr(value, "__next__"):
+        raise UnfingerprintableError(
+            "the result is an iterator, so the timed call did no work; "
+            "wrap the call in list() or otherwise consume it"
+        )
+    to_list = getattr(value, "tolist", None)
+    if callable(to_list):
+        materialize(to_list())
+        return
+    # Anything else the fingerprint renders with repr, which reads it whole.
+    repr(value)
 
 
 def process_age_s() -> float | None:
@@ -169,11 +220,13 @@ def main() -> int:
         "--package-root", required=True, help="directory under root put on sys.path, '.' for flat"
     )
     ap.add_argument(
-        "--setup", required=True, help="statements run once, with the alias and ROOT bound"
+        "--setup", required=True, help="statements run once, with the alias, ROOT and SEED bound"
     )
     ap.add_argument("--call", required=True, help="expression to time, in the setup namespace")
     ap.add_argument("--hot", required=True, help="the hot file, relative to root")
-    ap.add_argument("--fingerprint", default="", help="expression over result, else canonical")
+    ap.add_argument(
+        "--seed", type=int, required=True, help="the instance of the input, bound as SEED"
+    )
     ap.add_argument("--repeats", type=int, default=7)
     ap.add_argument("--label", default="")
     ap.add_argument("--verify", action="store_true")
@@ -199,7 +252,10 @@ def main() -> int:
             root=str(root),
         )
 
-    scope: dict[str, Any] = {args.alias: module, "ROOT": root}
+    def fresh_scope() -> dict[str, Any]:
+        return {args.alias: module, "ROOT": root, "SEED": args.seed}
+
+    scope = fresh_scope()
     t0 = time.perf_counter()
     exec(args.setup, scope)
     setup_s = time.perf_counter() - t0
@@ -211,6 +267,7 @@ def main() -> int:
         "pyc_fresh_before_import": pyc_fresh,
         "pid": os.getpid(),
         "hash_seed": os.environ.get("PYTHONHASHSEED", "<unset>"),
+        "seed": args.seed,
         "python": list(sys.version_info[:3]),
         "import_s": import_s,
         "setup_s": setup_s,
@@ -222,8 +279,7 @@ def main() -> int:
                 "the call returned an iterator, so nothing was computed inside the "
                 "timed region; wrap the call in list() or otherwise consume it"
             )
-        reduced = eval(args.fingerprint, dict(scope, result=result)) if args.fingerprint else result
-        return fingerprint(reduced)
+        return fingerprint(result)
 
     if args.verify:
         import cProfile
@@ -233,7 +289,12 @@ def main() -> int:
         profiler = cProfile.Profile()
         t0 = time.perf_counter()
         profiler.enable()
-        result = eval(args.call, scope)
+        try:
+            result = eval(args.call, scope)
+            materialize(result)
+        except UnfingerprintableError as e:
+            profiler.disable()
+            return _fail(error=str(e), **base)
         profiler.disable()
         call_s = time.perf_counter() - t0
         stats = pstats.Stats(profiler)
@@ -258,16 +319,20 @@ def main() -> int:
 
         base["fixed_s"] = process_age_s()
         plain: list[float] = []
-        for _ in range(PROFILE_PLAIN_RUNS):
+        try:
+            for _ in range(PROFILE_PLAIN_RUNS):
+                gc.collect()
+                t0 = time.perf_counter()
+                result = eval(args.call, scope)
+                materialize(result)
+                plain.append(time.perf_counter() - t0)
             gc.collect()
-            t0 = time.perf_counter()
-            result = eval(args.call, scope)
-            plain.append(time.perf_counter() - t0)
-        gc.collect()
-        profiler = cProfile.Profile()
-        profiler.enable()
-        eval(args.call, scope)
-        profiler.disable()
+            profiler = cProfile.Profile()
+            profiler.enable()
+            materialize(eval(args.call, scope))
+            profiler.disable()
+        except UnfingerprintableError as e:
+            return _fail(error=str(e), **base)
         stats = pstats.Stats(profiler)
         hot_tottime, total_tt, executed = hot_self_time(stats, hot)
         try:
@@ -294,30 +359,52 @@ def main() -> int:
     samples: list[dict[str, Any]] = []
     result = None
     base["fixed_s"] = process_age_s()
-    for _ in range(args.repeats):
+    for repeat in range(args.repeats):
+        # Every timed call gets a freshly built input. A result cached on the
+        # input object (t1_p2_w16 stored the whole answer in the graph's own
+        # cache dict and recorded 500x to 6400x) then never hits. Setup runs
+        # outside the timed region, as before.
+        if repeat:
+            scope = fresh_scope()
+            exec(args.setup, scope)
         gc.collect()
         before = prov.counters() if prov is not None else None
         t0 = time.perf_counter()
         result = eval(args.call, scope)
         t1 = time.perf_counter()
+        # The walk is inside the region: pyparsing_p3_w16 from round 14 returned
+        # lazy lists that split their text when first read, after the clock.
+        try:
+            materialize(result)
+        except UnfingerprintableError as e:
+            return _fail(error=str(e), **base)
+        t2 = time.perf_counter()
+        sample = {"t": t2 - t0, "walk_s": t2 - t1, "contaminated": False, "reasons": []}
         if prov is not None and before is not None:
             d = prov.delta(before, prov.counters())
             bad, reasons = prov.is_contaminated(d)
-            samples.append({"t": t1 - t0, "contaminated": bad, "reasons": reasons})
-        else:
-            samples.append({"t": t1 - t0, "contaminated": False, "reasons": []})
+            sample.update(contaminated=bad, reasons=reasons)
+        samples.append(sample)
 
     try:
         result_fp = fp_of(result)
     except UnfingerprintableError as e:
         return _fail(error=str(e), **base)
     clean: list[float] = [float(s["t"]) for s in samples if not s["contaminated"]]
+    times = [float(s["t"]) for s in samples]
     base.update(
         kind="run",
         repeats=args.repeats,
         samples=samples,
         min_clean=min(clean) if clean else None,
-        min_all=min(float(s["t"]) for s in samples),
+        min_all=min(times),
+        # The first call and the best of the rest, kept apart: a cache keyed on
+        # the input's content survives the fresh setup, and shows as later
+        # calls far faster than the first. The referee compares the gap on the
+        # two trees.
+        first_s=times[0],
+        warm_s=min(times[1:]) if len(times) > 1 else None,
+        walk_s=min(float(s["walk_s"]) for s in samples),
         n_contaminated=len(samples) - len(clean),
         result_fp=result_fp,
     )

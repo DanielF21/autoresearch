@@ -50,3 +50,64 @@ def test_clears_noise_at_the_floor_is_inclusive() -> None:
     assert clears_noise(1.0106, 1.0106)
     assert not clears_noise(1.0105, 1.0106)
     assert not clears_noise(None, 1.0106)
+
+
+def test_memoized_reads_the_first_call_gap_on_the_patched_tree_only() -> None:
+    from autoresearch.referee.timing import MEMO_FACTOR, memoized
+
+    def pair(i: int, base_gap: float, patched_gap: float, contaminated: bool = False) -> PairTiming:
+        return PairTiming(
+            i,
+            BASE_FIRST,
+            0,
+            1.0,
+            0.001,
+            contaminated,
+            base_first_s=base_gap,
+            base_warm_s=1.0,
+            patched_first_s=patched_gap * 0.001,
+            patched_warm_s=0.001,
+        )
+
+    # The cache: later calls a thousand times faster than the first, patched only.
+    assert memoized(tuple(pair(i, 1.2, 1000.0) for i in range(6)))
+    # Ordinary warm up on both trees.
+    assert not memoized(tuple(pair(i, 1.3, 1.4) for i in range(6)))
+    # A target whose first call is slow on both trees is not flagged.
+    assert not memoized(tuple(pair(i, 8.0, 9.0) for i in range(6)))
+    # The threshold is relative to the base gap as well as absolute.
+    assert not memoized(tuple(pair(i, 3.0, MEMO_FACTOR + 1) for i in range(6)))
+    # Records from a guest without the numbers, or nothing clean, are never flagged.
+    assert not memoized((PairTiming(0, BASE_FIRST, 0, 1.0, 0.001, False),))
+    assert not memoized(tuple(pair(i, 1.0, 1000.0, contaminated=True) for i in range(3)))
+    assert not memoized(())
+
+
+def test_overfit_compares_the_shown_instance_against_the_held_out_one() -> None:
+    from autoresearch.referee.timing import OVERFIT_FACTOR, overfit
+
+    floor = 1.02
+    # pycodestyle_p3_w16 0233: string equality against the regenerated inputs.
+    assert overfit(2985.0, 1.0, floor)
+    # A real speedup carries over to an instance the worker never saw.
+    assert not overfit(5.0, 4.6, floor)
+    # Two ratios inside the noise are never compared.
+    assert not overfit(1.01, 0.5, floor)
+    # The line is the factor, on a shown ratio that clears the floor.
+    assert not overfit(2.0, 2.0 / OVERFIT_FACTOR, floor)
+    assert overfit(2.0, 2.0 / OVERFIT_FACTOR - 0.01, floor)
+    # An input untimed on either instance is judged as untimed, not here.
+    assert not overfit(None, 1.0, floor) and not overfit(3.0, None, floor)
+
+
+def test_held_out_seeds_are_drawn_from_a_range_too_large_to_enumerate() -> None:
+    import random
+
+    from autoresearch.referee.timing import HELD_OUT_RANGE, SHOWN_SEED, draw_seed
+
+    assert SHOWN_SEED == 0 and HELD_OUT_RANGE[1] - HELD_OUT_RANGE[0] >= 2**31 - 1
+    seeds = {draw_seed() for _ in range(20)}
+    assert all(HELD_OUT_RANGE[0] <= s < HELD_OUT_RANGE[1] for s in seeds)
+    assert SHOWN_SEED not in seeds and len(seeds) > 1
+    # A seeded source makes a test's draw repeatable.
+    assert draw_seed(random.Random(5)) == draw_seed(random.Random(5))

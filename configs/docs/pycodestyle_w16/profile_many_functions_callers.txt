@@ -1,0 +1,21 @@
+Callers for the same profile: style.input_file('bench.py', lines=source) with pycodestyle.USER_CONFIG = None pycodestyle.PROJECT_CONFIG = () style = pycodestyle.StyleGuide(reporter=pycodestyle.BaseReport, paths=[]) rows = [] for i in range(2000): rows.extend(['def function_%d(value):' % i, ' return value + %d' % i]) if i + 1 < 2000: rows.extend(['', '']) source = [row + chr(10) for row in rows]
+   Ordered by: internal time
+   List reduced from 72 to 10 due to restriction <10>
+
+Function                                                                                                             was called by...
+                                                                                                                         ncalls  tottime  cumtime
+pycodestyle.py:1958(run_check)                                                                  <-   39990    0.041    0.100  pycodestyle.py:1968(check_physical)
+                                                                                                                          88000    0.070    0.100  pycodestyle.py:2018(check_logical)
+pycodestyle.py:2018(check_logical)                                                              <-    4000    0.109    0.528  pycodestyle.py:2136(check_all)
+{built-in method builtins.getattr}                                                                                   <-  343974    0.043    0.043  pycodestyle.py:1958(run_check)
+pycodestyle.py:2065(generate_tokens)                                                            <-   31998    0.035    0.275  pycodestyle.py:2136(check_all)
+/opt/sail/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/tokenize.py:577(_generate_tokens_from_c_tokenizer)  <-   31998    0.034    0.064  pycodestyle.py:2065(generate_tokens)
+                                                                                                                              1    0.000    0.000  pycodestyle.py:2136(check_all)
+pycodestyle.py:1980(build_tokens_line)                                                          <-    4000    0.032    0.043  pycodestyle.py:2018(check_logical)
+pycodestyle.py:2136(check_all)                                                                  <-       1    0.031    0.842  pycodestyle.py:2408(input_file)
+pycodestyle.py:1968(check_physical)                                                             <-    7998    0.025    0.133  pycodestyle.py:2082(maybe_check_physical)
+pycodestyle.py:1963(init_checker_state)                                                         <-   39990    0.007    0.007  pycodestyle.py:1968(check_physical)
+                                                                                                                          88000    0.016    0.017  pycodestyle.py:2018(check_logical)
+pycodestyle.py:1534(ambiguous_identifier)                                                       <-    4000    0.023    0.025  pycodestyle.py:2018(check_logical)
+
+

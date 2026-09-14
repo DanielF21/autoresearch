@@ -10,6 +10,7 @@ from autoresearch.worker.tools import (
     ToolContext,
     execute,
 )
+from tests.helpers import arg
 
 TARGET = load_config(Path(__file__).parent.parent / "configs" / "t1_w4d.toml").target
 
@@ -90,17 +91,37 @@ def test_run_benchmark_times_every_input_and_alternates_order() -> None:
     box = FakeBox().on("time_target.py", handler)  # type: ignore[arg-type]
     r = execute(ctx(box), "run_benchmark", {})
     n = len(TARGET.inputs)
-    assert roots == [BASE_DIR, REPO_DIR, REPO_DIR, BASE_DIR] * n
+    # Two pairs on the shown instance, alternating, then one pair on a held out seed.
+    assert roots == [BASE_DIR, REPO_DIR, REPO_DIR, BASE_DIR, BASE_DIR, REPO_DIR] * n
+    seeds = [arg(c, "--seed") for c in box.commands]
+    assert seeds[:4] == ["0"] * 4 and seeds[4] == seeds[5] != "0"
     for spec in TARGET.inputs:
         assert f"{spec.name}" in r.text
-    assert "1.250x" in r.text and "geometric mean 1.250x" in r.text
-    assert "worst 1.250x" in r.text
+    assert "shown    1.250x" in r.text and "held out    1.250x" in r.text
+    assert "geometric mean 1.250x" in r.text and "worst 1.250x" in r.text
+    assert "OVERFIT" not in r.text
     # The same flags the referee sends, pinned to the same core, so the worker
     # times what the referee will time.
     for c in box.commands:
         assert c.startswith("cd /workspace/guest && taskset -c 2 python3 time_target.py")
         assert f"--package {TARGET.package}" in c and f"--alias {TARGET.alias}" in c
         assert "--setup " in c and "--graph" not in c
+
+
+def test_run_benchmark_flags_a_patch_that_recognises_the_shown_instance() -> None:
+    """The worker's own view of what the referee will call overfit: fast on seed
+    0, unchanged on a seed it did not see."""
+
+    def handler(cmd: str) -> object:
+        base = BASE_DIR in cmd
+        shown = arg(cmd, "--seed") == "0"
+        return ok(json.dumps({"min_all": 1.0 if (base or not shown) else 0.001}))
+
+    box = FakeBox().on("time_target.py", handler)  # type: ignore[arg-type]
+    text = execute(ctx(box), "run_benchmark", {}).text
+    assert "<-- OVERFIT" in text and "shown 1000.000x" in text
+    assert "geometric mean 1.000x" in text
+    assert "far faster on the shown instance" in text
 
 
 def test_run_benchmark_flags_an_input_the_patch_made_slower() -> None:

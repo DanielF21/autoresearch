@@ -32,10 +32,19 @@ filesystem:
   /workspace/history   every earlier attempt, one directory per attempt named
                        0001, 0002 and so on, each holding patch.diff, the full
                        measurement.json, and rationale.md in that worker's
-                       words. The history table in the first message is an
-                       index of these.
+                       words. {index_note}
 
 """
+
+# The sentence that closes the history entry above, wrapped to its indent. Which
+# one a run gets follows ``[worker].history_index``; the default reproduces the
+# text the four versions were written with, byte for byte.
+INDEX_NOTE = "The history table in the first message is an\n                       index of these."
+NO_INDEX_NOTE = (
+    "The first message says how many there are;\n"
+    "                       there is no index, so the directories are the\n"
+    "                       record."
+)
 
 RUN_RULES = """\
 How the run works:

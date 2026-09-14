@@ -1,6 +1,8 @@
 # Target 1, width 1: the width experiment, launched 2026-09-12 on the control box.
 #
-# Identical to t1_w4d.toml except run_id, width and rounds. Four of these run at
+# Identical to t1_w4d.toml as it stood on 2026-09-12 except run_id, width and
+# rounds; the worker caps here (80 turns, 3600 s, 8M tokens) are a third of what
+# t1_w4d.toml carries since 2026-09-13. Four of these run at
 # once, widths 1, 4, 16 and 64, 16 rounds each, so the only thing that differs
 # between them is how many workers see the same history each round.
 #

@@ -1,5 +1,8 @@
 """The worker prompt: the history index as a survey of mechanisms."""
 
+from pathlib import Path
+
+from autoresearch.config import TargetSpec, load_config
 from autoresearch.types import (
     Attempt,
     AttemptRef,
@@ -12,6 +15,7 @@ from autoresearch.types import (
     Usage,
 )
 from autoresearch.worker import prompt
+from autoresearch.worker.prompt.render import index_line, outcome
 from tests.helpers import BASE_SHA
 
 
@@ -70,19 +74,120 @@ def test_the_index_carries_each_rationale_first_line() -> None:
     assert "Choice: extend" not in text
 
 
+def test_the_outcome_names_a_patch_that_recognised_its_input() -> None:
+    """pycodestyle_p3_w16 0233 would have read as 'real speedup 2985x'. The
+    index says what the referee established instead, and the row's geomean is
+    the held out score."""
+    from dataclasses import replace
+
+    a = _attempt(4, "Match the six benchmark files by string equality.", 1.0)
+    assert a.measurement is not None
+    fitted = replace(a.measurement.inputs[0], shown_speedup=2985.0, overfit=True)
+    a = replace(a, measurement=replace(a.measurement, inputs=(fitted,)))
+    assert outcome(a) == "overfit on dense"
+    row = index_line(a)
+    assert "1.00x" in row and "2985" not in row and "overfit on dense" in row
+
+
+def test_the_target_section_explains_the_seed_and_the_held_out_instance() -> None:
+    text = prompt.render_target(_target(), BASE_SHA, 6)
+    assert "`SEED` to an integer" in text
+    assert "one seed you are never shown" in text and "recorded as overfit" in text
+    assert "walk over its result" in text
+    assert "seed=3 + SEED" in text
+
+
 def test_every_version_shares_the_mechanics_and_names_no_budget() -> None:
-    assert sorted(prompt.VERSIONS) == ["v1", "v2", "v3", "v4"]
+    assert sorted(prompt.VERSIONS) == ["v0", "v1", "v2", "v3", "v4"]
     for version in prompt.VERSIONS:
         text = prompt.system_prompt(version, "3.12.4")
-        assert "Python 3.12.4" in text and "{python}" not in text
+        assert "Python 3.12.4" in text and "{python}" not in text and "{index_note}" not in text
         for word in ("80 turns", "3600", "max_turns", "budget"):
             assert word not in text
+        if version == "v0":
+            continue  # the frozen width experiment prompt predates these blocks
         # The blocks no version may drift on.
         assert "current turn is your last" in text
         assert "made before your first measurement" in text
         assert "Measure to decide, not to explore" in text
         assert "line 1     one sentence naming the mechanism" in text
         assert "Choice     " in text and "Untried    " in text
+
+
+def _target() -> TargetSpec:
+    return load_config(Path(__file__).parent.parent / "configs" / "t1_w4d.toml").target
+
+
+def test_v0_is_the_width_experiment_prompt_with_its_own_closing() -> None:
+    text = prompt.system_prompt("v0", "3.12.4")
+    assert text.startswith(
+        "You are a performance engineer working alone in a sandbox on one repository."
+    )
+    assert "The history table below is only an index of these." in text
+    assert "current turn is your last" not in text
+    # The sandbox note argument is for the composed versions; v0 ignores it.
+    assert prompt.system_prompt("v0", "3.12.4", history_index=False) == text
+    old = prompt.initial_user_message(
+        _target(), BASE_SHA, (), (), 7, 6, closing=prompt.closing("v0")
+    )
+    assert old.endswith(
+        "You are attempt 0007. Begin by reading the hot file and the history with the "
+        "shell, then make one change and submit."
+    )
+    new = prompt.initial_user_message(_target(), BASE_SHA, (), (), 7, 6)
+    assert new.endswith("write down what you expect before you measure, then make your change.")
+    assert prompt.closing("v1") == prompt.CLOSING
+
+
+def test_the_sandbox_note_follows_history_index() -> None:
+    with_index = prompt.system_prompt("v1", "3.12.4")
+    assert "The history table in the first message is an\n" in with_index
+    assert "index of these." in with_index
+    without = prompt.system_prompt("v1", "3.12.4", history_index=False)
+    assert "there is no index, so the directories are the" in without
+    assert "history table" not in without
+    # The default output is what the four versions were written with: the note
+    # sits inside the indented filesystem block, wrapped to it.
+    assert "                       index of these.\n" in with_index
+
+
+def test_hidden_attempts_are_announced_in_every_shape_of_the_section() -> None:
+    history = (_attempt(1, "Bitmask the neighbour sets.", 3.0),)
+    assert "withheld" not in prompt.render_history(history)
+    told = prompt.render_history(history, hidden=2)
+    assert "2 attempts from the record are withheld from you this round" in told
+    assert "numbering has gaps" in told and "Bitmask" in told
+    one = prompt.render_history(history, hidden=1)
+    assert "1 attempt from the record is withheld" in one
+    # Everything withheld: the slot is not told it is first.
+    empty = prompt.render_history((), hidden=3)
+    assert "You are first" not in empty
+    assert "3 attempts from the record are withheld" in empty
+    assert "/workspace/history does not exist for you" in empty
+
+
+def test_no_index_rendering_names_the_directories_and_no_scores() -> None:
+    history = (
+        _attempt(1, "Bitmask the neighbour sets.", 3.0),
+        _attempt(2, "", None),
+        _attempt(3, "Cache degrees per node.", 2.0),
+    )
+    text = prompt.initial_user_message(_target(), BASE_SHA, (), history, 4, 6, index=False)
+    assert "3 earlier attempts" in text
+    assert "measurement.json holds the geomean" in text
+    assert "rationale.md opens with the line naming the mechanism" in text
+    for absent in (
+        "best 3.00x",
+        "3.00x",
+        "real speedup",
+        "Bitmask",
+        "Cache degrees",
+        "mechanism\n",
+    ):
+        assert absent not in text
+    assert "withheld" not in text
+    told = prompt.render_history(history, hidden=2, index=False)
+    assert "2 attempts from the record are withheld" in told and "3.00x" not in told
 
 
 def test_each_version_has_its_own_job() -> None:

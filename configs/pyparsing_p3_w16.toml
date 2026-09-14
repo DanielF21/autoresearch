@@ -1,0 +1,199 @@
+# pyparsing, width 16, 16 rounds: four system prompts, four worker slots each.
+# Slot w runs version w mod 4 (v1 generalist, v2 depart, v3 combine, v4
+# shrink) on the full history with the index.
+#
+# Identical to pyparsing_p0_w16.toml except prompts.
+
+[run]
+run_id = "pyparsing_p3_w16"
+width = 16
+rounds = 16
+
+[target]
+name = "pyparsing"
+repo = "https://github.com/pyparsing/pyparsing"
+sha = "efd56db4e59f36b1673ce0eb0823e3afaa9d1201"
+package = "pyparsing"
+alias = "pp"
+package_root = "."
+hot_file = "pyparsing/core.py"
+call = "grammar.parse_string(data, parse_all=True)"
+pip = ["railroad-diagrams", "jinja2", "matplotlib"]
+allow = ["pyparsing/**"]
+deny = ["tests/**", "docs/**", "examples/**"]
+fingerprint = "len(result)"
+docs = ["configs/docs/pyparsing_w16/profile_inputs.txt", "configs/docs/pyparsing_w16/profile_flat_sequence_flat.txt", "configs/docs/pyparsing_w16/profile_flat_sequence_callers.txt"]
+
+[target.tests]
+module = "tests/test_simple_unit.py"
+full = "tests"
+
+# regime: Flat concatenation: one long And over ~10k token/suppressed-literal children;
+#         no alternation, recursion, or whitespace skipping.
+# why: Every timed parse walks the full 5,000 field And, so stress is in And.parseImpl
+#      iterating the exprs list and _parseNoCache per child; CharsNotIn provides Python-
+#      level character scanning.
+[[target.inputs]]
+name = "flat_sequence"
+noise_floor = 1.0189   # calibrated 20260913-210420, 42 null pairs
+setup = '''
+n = 5000
+pieces = []
+for i in range(n):
+    if i:
+        pieces.append(pp.Suppress(pp.Literal(';')))
+    pieces.append(pp.CharsNotIn(';'))
+grammar = pp.And(pieces)
+grammar.streamline()
+data = ";".join(f"v{i}" for i in range(n))
+'''
+
+# regime: Flat repetition: OneOrMore over a single Word(alphas), with whitespace skipped
+#         between tokens.
+# why: The single OneOrMore loop re-enters the same Word child 9,000 times, so
+#      _MultipleMatch.parseImpl and per-token Word parse dispatch dominate; there are no
+#      delimiters or nested groups.
+[[target.inputs]]
+name = "token_repetition"
+noise_floor = 1.0320   # calibrated 20260913-210420, 42 null pairs
+setup = '''
+n = 9000
+words = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"]
+data = " ".join(words[i % 8] for i in range(n))
+grammar = pp.OneOrMore(pp.Word(pp.alphas))
+grammar.streamline()
+'''
+
+# regime: Delimited repetition: DelimitedList combines CharsNotIn content with
+#         suppressed comma delimiters and an inner And/ZeroOrMore loop.
+# why: DelimitedList turns 6,000 fields into a mixed And plus ZeroOrMore structure; this
+#      exercises delimiter suppression and repeated CharsNotIn parsing rather than the
+#      plain OneOrMore path.
+[[target.inputs]]
+name = "delimited_fields"
+noise_floor = 1.0313   # calibrated 20260913-210420, 42 null pairs
+setup = '''
+n = 6000
+grammar = pp.DelimitedList(pp.CharsNotIn(','))
+grammar.streamline()
+data = ",".join(f"field{i}" for i in range(n))
+'''
+
+# regime: Grouped record sequence: OneOrMore of Group(And(...)) per line, with named
+#         results and a one_of level alternative; newline matching is whitespace-
+#         sensitive.
+# why: 3,000 lines force repeated construction of grouped, named ParseResults while
+#      walking an And per line; this exercises line-oriented sequences, results-name
+#      handling, and the one_of alternative path.
+[[target.inputs]]
+name = "record_lines"
+noise_floor = 1.0490   # calibrated 20260913-210420, 42 null pairs
+setup = '''
+n = 3000
+levels = ["INFO", "WARN", "ERROR", "DEBUG"]
+lines = []
+for i in range(n):
+    lines.append(f"{i:06d} [{levels[i % 4]}] message_{i}")
+data = "\n".join(lines) + "\n"
+seq = pp.Word(pp.nums, exact=6)
+level = pp.one_of("INFO WARN ERROR DEBUG")
+msg = pp.CharsNotIn("\n")
+line = pp.Group(seq("seq") + pp.Suppress("[") + level("level") + pp.Suppress("] ") + msg("msg"))
+newline = pp.Literal("\n").leave_whitespace()
+grammar = pp.OneOrMore(line + pp.Suppress(newline))
+grammar.streamline()
+'''
+
+# regime: Dict accumulation: dict_of builds Dict(OneOrMore(Group(key + value))), with a
+#         two-alternative MatchFirst value and Dict.postParse.
+# why: 3,500 key:value pairs exercise Dict.postParse over grouped results and a
+#      MatchFirst of Word token types, a distinct core path from the line-record groups
+#      and the plain repetitions.
+[[target.inputs]]
+name = "dict_pairs"
+noise_floor = 1.0192   # calibrated 20260913-210420, 42 null pairs
+setup = '''
+n = 3500
+parts = []
+for i in range(n):
+    if i % 2:
+        val = str(i)
+    else:
+        val = "val" + chr(97 + (i % 26))
+    parts.append(f"key{i}:{val}")
+data = " ".join(parts)
+key_expr = pp.Word(pp.alphas, pp.alphanums) + pp.Suppress(":")
+value_expr = pp.Word(pp.nums) | pp.Word(pp.alphas, pp.alphanums)
+grammar = pp.dict_of(key_expr, value_expr)
+grammar.streamline()
+'''
+
+# regime: Recursive operator grammar: infix_notation builds nested
+#         Forward/match_lookahead/Group expressions with right- and left-associative
+#         operators and parentheses.
+# why: 80 random top-level terms with nested parenthesized subexpressions exercise
+#      Forward recursion, infix lookahead, and both right- and left-associative operator
+#      levels; this is the most backtracking-heavy path and least like the
+#      flat/repetition inputs.
+[[target.inputs]]
+name = "recursive_infix"
+noise_floor = 1.0287   # calibrated 20260913-210420, 42 null pairs
+setup = '''
+import random
+rnd = random.Random(1234)
+ops = ["+", "-", "*", "/", "%", "^"]
+def make_term(depth):
+    if depth >= 3 or rnd.random() < 0.30:
+        return str(rnd.randint(0, 999))
+    left = make_term(depth + 1)
+    right = make_term(depth + 1)
+    expr = left + " " + rnd.choice(ops) + " " + right
+    if rnd.random() < 0.25:
+        expr = "(" + expr + ")"
+    return expr
+n = 80
+parts = [make_term(0) for _ in range(n)]
+data = parts[0]
+for p in parts[1:]:
+    data += " " + rnd.choice(ops) + " " + p
+integer = pp.Word(pp.nums)
+grammar = pp.infix_notation(
+    integer,
+    [
+        (pp.one_of("^"), 2, pp.OpAssoc.RIGHT),
+        (pp.one_of("* / %"), 2, pp.OpAssoc.LEFT),
+        (pp.one_of("+ -"), 2, pp.OpAssoc.LEFT),
+    ],
+)
+grammar.streamline()
+'''
+
+[worker]
+model = "deepseek/deepseek-v4-pro-0813"
+reasoning_effort = "high"
+completion_window = "asap"
+max_turns = 240
+max_seconds = 10800
+max_input_tokens = 24000000
+turn_timeout = 600
+prompts = ["v1", "v2", "v3", "v4"]
+
+[referee]
+pairs = 6
+repeats_per_launch = 7
+min_clean_pairs = 4
+hash_seeds = [0, 1, 2, 3, 4]
+
+[boxes]
+worker_size = "m"
+referee_size = "m"
+control_size = "m"
+disk_gib = 32
+
+[storage]
+volume = "autoresearch"
+mount = "/mnt/autoresearch"
+
+[observe]
+enabled = true
+session_prefix = ""

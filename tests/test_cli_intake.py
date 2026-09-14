@@ -217,5 +217,5 @@ def test_writing_floors_or_docs_keeps_a_check_current_and_a_setup_change_does_no
     assert admissibility.admission_hash(parse_config(set_docs(text, [])).target) == base
     no_floor = text.replace(GN800_FLOOR, "", 1)
     assert admissibility.admission_hash(parse_config(no_floor).target) == base
-    other = text.replace("nx.gn_graph(800, seed=3)", "nx.gn_graph(801, seed=3)", 1)
+    other = text.replace("nx.gn_graph(800, seed=3 + SEED)", "nx.gn_graph(801, seed=3 + SEED)", 1)
     assert admissibility.admission_hash(parse_config(other).target) != base

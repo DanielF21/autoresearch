@@ -42,7 +42,9 @@ def config_text(seed: int, *, docs: bool, floor: bool) -> str:
     if not floor:
         text = text.replace(GN800_FLOOR, "", 1)
     text = set_docs(text, ["doc.txt"] if docs else [])
-    return text.replace("nx.gn_graph(800, seed=3)", f"nx.gn_graph(800, seed={seed})", 1)
+    return text.replace(
+        "nx.gn_graph(800, seed=3 + SEED)", f"nx.gn_graph(800, seed={seed} + SEED)", 1
+    )
 
 
 @dataclass
@@ -342,13 +344,17 @@ def test_auto_takes_a_repository_to_a_calibrated_config_with_the_real_commands(
     monkeypatch.setattr(sail_model, "SailChatModel", lambda worker: models.pop(0))
 
     args = ["auto", f"file://{src}", "--width", "4", "--rounds", "2", "--template", str(PILOT)]
+    # A second target family can be taken in beside an existing one without
+    # overwriting its config or documents: both go where these flags say.
+    args += ["--configs", "configs/seeded", "--docs-root", "configs/seeded/docs"]
     assert main([*args, "--yes", "--until", "calibrated"]) == 0, capsys.readouterr().out
     out = capsys.readouterr().out
     assert "stopped at ready to run" in out
 
-    cfg = load_config(tmp_path / "configs" / "repo_w4.toml")
+    cfg = load_config(tmp_path / "configs" / "seeded" / "repo_w4.toml")
     assert (cfg.width, cfg.rounds) == (4, 2)
     assert cfg.target.uncalibrated == () and cfg.target.docs
+    assert all(d.startswith("configs/seeded/docs/") for d in cfg.target.docs)
     assert all((tmp_path / d).is_file() for d in cfg.target.docs)
     assert len(factory.created) == 3 and all(b.terminated for b in factory.created)
     assert models == []

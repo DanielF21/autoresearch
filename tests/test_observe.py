@@ -92,7 +92,7 @@ def test_a_submitted_attempt_emits_one_trace_in_order(config: RunConfig) -> None
     [
         ([text("no tools here"), text("still none")], "no_progress"),
         (
-            [tool_call("shell", {"cmd": "cat -n a"})] * 3,
+            [tool_call("shell", {"cmd": "cat -n a"})] * 10,
             "repeated_tool_call",
         ),
     ],

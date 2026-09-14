@@ -1,10 +1,13 @@
 from autoresearch.patch import (
+    added_lines,
     changed_files,
     changed_line_count,
     matches_any,
     normalised_hash,
+    overlap,
     scope_violations,
 )
+from tests.helpers import diff_with
 
 DIFF = """\
 diff --git a/networkx/algorithms/cluster.py b/networkx/algorithms/cluster.py
@@ -74,3 +77,24 @@ def test_normalised_hash_ignores_index_line_numbers_and_trailing_space() -> None
     )
     assert normalised_hash(a) == normalised_hash(b)
     assert normalised_hash(a) != normalised_hash(a.replace("discard", "remove"))
+
+
+def test_added_lines_are_the_stripped_plus_lines_without_headers() -> None:
+    assert added_lines(DIFF) == frozenset({"ipreds = set(preds)", "ipreds.discard(i)", "assert 1"})
+    assert added_lines(diff_with(("  a = 1  ", "", "b = 2"))) == frozenset({"a = 1", "b = 2"})
+    assert added_lines("--- a\n+++ b\n-gone\n") == frozenset()
+
+
+def test_overlap_is_symmetric_over_the_smaller_patch() -> None:
+    three = diff_with(("a = 1", "b = 2", "c = 3"))
+    assert overlap(three, three) == 1.0
+    assert overlap(three, diff_with(("x = 1", "y = 2"))) == 0.0
+    # A one line patch wholly inside a larger one scores 1.0 either way round.
+    one = diff_with(("b = 2",))
+    assert overlap(three, one) == 1.0 and overlap(one, three) == 1.0
+    # Half the lines shared, measured against the smaller side.
+    assert overlap(three, diff_with(("b = 2", "z = 9"))) == 0.5
+    # Whitespace does not count as a difference.
+    assert overlap(three, diff_with(("a=1".replace("=", " = "), "  b = 2"))) == 1.0
+    # A patch that only deletes adds nothing to compare.
+    assert overlap(three, "--- a\n+++ b\n-gone\n") is None

@@ -1,0 +1,21 @@
+Callers for the same profile: pycodestyle.Checker(lines=SRC_LINES, options=OPTIONS).check_all() with import random NL = chr(10) SQ = chr(39) rng = random.Random(SEED) letters = 'abcdefghijklmnopqrstuvwxyz' long_word = ''.join(rng.choice(letters) for _ in range(80)) lines = ['import os' + NL, 'import sys' + NL, NL] N = 5000 for i in range(N): typ = rng.randrange(6) if typ == 0: lines.append(f'value_{i} = helper_{i}(arg_{i}, {i}){NL}') elif typ == 1: lines.append(f'value_{i}=helper_{i}(arg_{i}, {i}){NL}') elif typ == 2: lines.append(f'value_{i} = helper_{i}(arg_{i}, factor = {i}){NL}') elif typ == 3: lines.append(f'value_{i} = helper_{i}({i},{i}){NL}') elif typ == 4: lines.append(f'value_{i} = helper_{i}(arg_{i}, {i}) {NL}') else: lines.append(f'value_{i} = helper_{i}(arg_{i}, {SQ}{long_word}{i}_{SEED}{SQ}){NL}') lines.append(NL) lines.append(NL) for _ in range(17 + (SEED % 3) + (SEED % 5) + (SEED % 7)): lines.append(f'tail_{SEED}_{_}=1{NL}') OPTIONS = pycodestyle.StyleGuide(quiet=True, select=['E', 'W'], max_line_length=79, max_doc_length=72, indent_size=4).options SRC_LINES = lines
+   Ordered by: internal time
+   List reduced from 84 to 10 due to restriction <10>
+
+Function                                                                                                             was called by...
+                                                                                                                         ncalls  tottime  cumtime
+pycodestyle.py:2018(check_logical)                                                              <-    5019    0.156    0.959  pycodestyle.py:2136(check_all)
+pycodestyle.py:1958(run_check)                                                                  <-   25110    0.027    0.069  pycodestyle.py:1968(check_physical)
+                                                                                                                         125475    0.102    0.142  pycodestyle.py:2018(check_logical)
+pycodestyle.py:1980(build_tokens_line)                                                          <-    5019    0.054    0.077  pycodestyle.py:2018(check_logical)
+{built-in method builtins.getattr}                                                                                   <-  391521    0.049    0.049  pycodestyle.py:1958(run_check)
+pycodestyle.py:2065(generate_tokens)                                                            <-   46718    0.047    0.295  pycodestyle.py:2136(check_all)
+/opt/sail/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/tokenize.py:577(_generate_tokens_from_c_tokenizer)  <-   46718    0.046    0.088  pycodestyle.py:2065(generate_tokens)
+                                                                                                                              1    0.000    0.000  pycodestyle.py:2136(check_all)
+pycodestyle.py:830(missing_whitespace)                                                          <-    6731    0.040    0.043  pycodestyle.py:2018(check_logical)
+pycodestyle.py:1708(maximum_doc_length)                                                         <-    5019    0.040    0.063  pycodestyle.py:2018(check_logical)
+pycodestyle.py:2136(check_all)                                                                  <-       1    0.039    1.302  <string>:1(<module>)
+pycodestyle.py:1345(_break_around_binary_operators)                                             <-   46714    0.015    0.015  pycodestyle.py:1371(break_before_binary_operator)
+                                                                                                                          46714    0.022    0.022  pycodestyle.py:1401(break_after_binary_operator)
+
+

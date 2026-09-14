@@ -1,0 +1,39 @@
+Callers for the same profile: grammar.parse_string(text, parse_all=True) with import random pp.ParserElement.disable_memoization() rnd = random.Random(SEED) ops = ("+", "-", "*", "/") number = pp.CharsNotIn("+-*/()").set_name("number") muldiv = (pp.Literal("*") | pp.Literal("/")).set_name("muldiv") addsub = (pp.Literal("+") | pp.Literal("-")).set_name("addsub") lpar = pp.Suppress("(") rpar = pp.Suppress(")") expr = pp.Forward().set_name("expr") atom = (number | lpar + expr + rpar).set_name("atom") term = (atom + pp.ZeroOrMore(muldiv + atom)).set_name("term") expr <<= term + pp.ZeroOrMore(addsub + term) grammar = expr num = lambda: str(rnd.randint(100000, 999999)) n_terms = 5000 text = num() + "".join(rnd.choice(ops) + num() for _ in range(n_terms - 1))
+   Ordered by: internal time
+   List reduced from 64 to 10 due to restriction <10>
+
+Function                                                   was called by...
+                                                               ncalls  tottime  cumtime
+pyparsing/core.py:928(_parseNoCache)  <-       2    0.000    0.211  pyparsing/core.py:1286(parse_string)
+                                                              15049/5    0.029    0.211  pyparsing/core.py:4618(parseImpl)
+                                                                17538    0.035    0.083  pyparsing/core.py:4885(parseImpl)
+                                                                    1    0.000    0.211  pyparsing/core.py:5167(parseImpl)
+                                                            7523/2530    0.017    0.207  pyparsing/core.py:5692(parseImpl)
+pyparsing/results.py:170(__new__)     <-   27526    0.016    0.023  pyparsing/core.py:928(_parseNoCache)
+                                                                 1298    0.004    0.005  pyparsing/core.py:5820(parseImpl)
+pyparsing/core.py:4885(parseImpl)     <-   12523    0.015    0.100  pyparsing/core.py:928(_parseNoCache)
+pyparsing/core.py:4618(parseImpl)     <-  7525/2    0.014    0.211  pyparsing/core.py:928(_parseNoCache)
+pyparsing/core.py:909(preParse)       <-   27588    0.010    0.013  pyparsing/core.py:928(_parseNoCache)
+                                                                    1    0.000    0.000  pyparsing/core.py:1286(parse_string)
+                                                                 2524    0.001    0.001  pyparsing/core.py:4885(parseImpl)
+pyparsing/results.py:194(__init__)    <-   27526    0.009    0.014  pyparsing/core.py:928(_parseNoCache)
+                                                                 1298    0.000    0.001  pyparsing/core.py:5820(parseImpl)
+{built-in method builtins.len}                             <-   25111    0.003    0.003  pyparsing/core.py:909(preParse)
+                                                                40113    0.004    0.004  pyparsing/core.py:928(_parseNoCache)
+                                                                    1    0.000    0.000  pyparsing/core.py:1145(reset_cache)
+                                                                    1    0.000    0.000  pyparsing/core.py:2751(__init__)
+                                                                 5000    0.001    0.001  pyparsing/core.py:3943(parseImpl)
+                                                                    2    0.000    0.000  pyparsing/core.py:4183(parseImpl)
+pyparsing/results.py:549(__iadd__)    <-    7524    0.005    0.007  pyparsing/core.py:4618(parseImpl)
+                                                                 3773    0.002    0.003  pyparsing/core.py:5692(parseImpl)
+{built-in method builtins.isinstance}                      <-       2    0.000    0.000  /workspace/guest/time_target.py:107(materialize)
+                                                                    2    0.000    0.000  pyparsing/core.py:1622(__add__)
+                                                                    4    0.000    0.000  pyparsing/core.py:2266(__eq__)
+                                                                    4    0.000    0.000  pyparsing/core.py:4299(__init__)
+                                                                    2    0.000    0.000  pyparsing/core.py:4314(<genexpr>)
+                                                                    3    0.000    0.000  pyparsing/core.py:4508(__init__)
+                                                                41423    0.006    0.006  pyparsing/results.py:170(__new__)
+                                                                11297    0.001    0.001  pyparsing/results.py:549(__iadd__)
+pyparsing/core.py:3943(parseImpl)     <-    5000    0.006    0.008  pyparsing/core.py:928(_parseNoCache)
+
+

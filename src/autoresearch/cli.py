@@ -621,6 +621,8 @@ def cmd_auto(args: argparse.Namespace) -> int:
         template=Path(args.template),
         package=args.package,
         intake_root=Path(args.root),
+        configs=Path(args.configs),
+        docs_root=Path(args.docs_root),
     )
     if args.yes:
         env.load_dotenv()
@@ -736,6 +738,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--template", default="configs/t1_w4d.toml", help="source of every non target section"
     )
     p.add_argument("--root", default="runs/auto", help="where clones and drafts go")
+    p.add_argument("--configs", default="configs", help="where the config is written")
+    p.add_argument("--docs-root", default="configs/docs", help="documents go in <this>/<run_id>")
     p.set_defaults(func=cmd_auto)
 
     p = sub.add_parser(

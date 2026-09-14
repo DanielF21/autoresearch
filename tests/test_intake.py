@@ -13,7 +13,7 @@ import pytest
 
 from autoresearch.config import load_config, parse_config
 from autoresearch.intake import derive, propose, render, scope
-from autoresearch.model.fake_model import FakeChatModel, text, tool_call
+from autoresearch.model.fake_model import FakeChatModel, malformed_call, text, tool_call
 
 ROOT = Path(__file__).parent.parent
 TEMPLATE = ROOT / "configs" / "t1_w4d.toml"
@@ -173,6 +173,83 @@ def test_several_packages_need_a_name_unless_one_matches(tmp_path: Path) -> None
     assert draft is not None and draft.package == "gadget"
 
 
+FOO_PYPROJECT = '[project]\nname = "foo"\n'
+
+
+def _module_repo(tmp_path: Path, **extra: str) -> Path:
+    files = {
+        "pyproject.toml": FOO_PYPROJECT,
+        "foo.py": HOT,
+        "tests/test_foo.py": "def test_parse():\n    pass\n",
+    }
+    files.update(extra)
+    return _write(tmp_path / "repo", files)
+
+
+def test_a_single_module_named_after_the_project_is_drafted(tmp_path: Path) -> None:
+    repo = _module_repo(tmp_path)
+    draft, findings = _derive(repo, url="https://github.com/org/foo")
+    assert draft is not None, findings
+    assert (draft.package, draft.package_root, draft.single_module) == ("foo", ".", True)
+    assert draft.allow == ("foo.py",) and draft.package_dir == "foo.py"
+    assert draft.tests_full == "tests" and draft.deny == ("tests/**",)
+    text = derive.brief(repo, draft)
+    assert "single module `foo.py`, imported as `foo`" in text
+    assert "- `foo.py` 2" in text and "Largest modules" not in text
+
+
+def test_a_single_module_is_scanned_for_threads(tmp_path: Path) -> None:
+    repo = _module_repo(tmp_path, **{"foo.py": "import threading\n" + HOT})
+    _, findings = _derive(repo, url="https://github.com/org/foo")
+    assert any(f.rule == "one core" and "foo.py" in f.detail for f in findings)
+
+
+def test_a_package_directory_beats_a_stray_module_of_the_same_name(tmp_path: Path) -> None:
+    repo = _module_repo(tmp_path, **{"foo/__init__.py": "", "foo/core.py": HOT})
+    draft, findings = _derive(repo, url="https://github.com/org/foo")
+    assert draft is not None, findings
+    assert not draft.single_module and draft.allow == ("foo/**",)
+    assert draft.package_dir == "foo"
+
+
+def test_a_module_not_named_after_the_project_is_no_package(tmp_path: Path) -> None:
+    repo = _write(
+        tmp_path / "repo",
+        {
+            "pyproject.toml": '[project]\nname = "bar"\n',
+            "setup.py": "from setuptools import setup\nsetup()\n",
+            "tests/test_x.py": "",
+        },
+    )
+    draft, findings = _derive(repo, url="https://github.com/org/bar")
+    assert draft is None and _refusals(findings) == ["package"]
+    assert "or a single module named after the project" in findings[0].detail
+    assert scope.find_packages(repo, ("bar", "setup")) == [(".", "setup")]
+
+
+def test_an_old_draft_without_single_module_loads_as_a_package(tmp_path: Path) -> None:
+    draft, _ = _derive(_widget(tmp_path))
+    assert draft is not None
+    d = draft.to_dict()
+    assert d["single_module"] is False
+    del d["single_module"]
+    assert derive.Draft.from_dict(d).single_module is False
+    assert derive.Draft.from_dict(draft.to_dict()) == draft
+
+
+def test_a_single_module_proposal_must_name_the_module(tmp_path: Path) -> None:
+    repo = _module_repo(tmp_path, **{"other.py": HOT})
+    draft, findings = _derive(repo, url="https://github.com/org/foo")
+    assert draft is not None, findings
+    template = load_config(TEMPLATE)
+    good = dict(GOOD, hot_file="foo.py", tests_module="tests/test_foo.py")
+    accepted = propose.validate(good, repo, draft, template, "now")
+    assert not isinstance(accepted, str), accepted
+    assert parse_config(accepted[1]).target.hot_file == "foo.py"
+    rejected = propose.validate(dict(good, hot_file="other.py"), repo, draft, template, "now")
+    assert isinstance(rejected, str) and "must be the single module, foo.py" in rejected
+
+
 def test_threads_and_tox_are_warnings_not_refusals(tmp_path: Path) -> None:
     repo = _widget(tmp_path, **{"widget/pool.py": "import threading\n", "tox.ini": "[tox]\n"})
     draft, findings = _derive(repo)
@@ -245,7 +322,6 @@ GOOD: dict[str, Any] = {
     "hot_file": "widget/core.py",
     "alias": "w",
     "call": "w.parse(text)",
-    "fingerprint": "",
     "tests_module": "tests/test_core.py",
     "extra_pip": ["regex"],
     "axis": "text length and word density",
@@ -253,13 +329,13 @@ GOOD: dict[str, Any] = {
     "inputs": [
         {
             "name": "dense",
-            "setup": "import random\nrnd = random.Random(1)\ntext = ' '.join(str(rnd.random()) for _ in range(1000))\n",
+            "setup": "import random\nrnd = random.Random(1 + SEED)\ntext = ' '.join(str(rnd.random()) for _ in range(1000))\n",
             "regime": "dense, short words",
             "why": "the list comprehension dominates",
         },
         {
             "name": "sparse",
-            "setup": "text = 'x' + ' ' * 100000 + '[[target.inputs]]'",
+            "setup": "text = 'x' * (1 + SEED % 7) + ' ' * 100000 + '[[target.inputs]]'",
             "regime": "sparse",
             "why": "whitespace scanning dominates",
         },
@@ -351,6 +427,28 @@ def test_a_rejected_proposal_gets_its_reasons_and_an_accepted_one_loads(tmp_path
     for reason in ("inside the package", "not one expression", "2 to 12 inputs"):
         assert reason in replies["c3"]
     assert outcome.turns == 4
+    # A setup that ignores SEED is one point in input space, and refused by name.
+    point = dict(GOOD["inputs"][0], setup="text = 'a b c' * 1000")
+    result = propose.validate(
+        dict(GOOD, inputs=[point, GOOD["inputs"][1]]),
+        out / derive.REPO_DIR,
+        draft,
+        load_config(TEMPLATE),
+        "now",
+    )
+    assert isinstance(result, str) and "setup of dense does not read SEED" in result
+    # A result built around the library's, with a seed tag beside it, is refused:
+    # the first pycodestyle proposal under the seed rule did exactly that.
+    for tagged in ("[w.parse(text), tag]", "(w.parse(text), SEED)", "w.parse(text) + [SEED]"):
+        result = propose.validate(
+            dict(GOOD, call=tagged), out / derive.REPO_DIR, draft, load_config(TEMPLATE), "now"
+        )
+        assert isinstance(result, str) and "call must be one function call" in result
+    for plain in ("w.parse(text)", "list(w.stream(text))", "sorted(w.parse(text), key=len)"):
+        result = propose.validate(
+            dict(GOOD, call=plain), out / derive.REPO_DIR, draft, load_config(TEMPLATE), "now"
+        )
+        assert not isinstance(result, str)
     # Nothing in the text goes stale once profile and calibrate write docs and floors.
     for stale in ("Not admitted", "noise_floor is absent", "profile writes these"):
         assert stale not in outcome.text
@@ -374,6 +472,24 @@ def test_a_rejected_proposal_gets_its_reasons_and_an_accepted_one_loads(tmp_path
     assert json.loads((out / "usage.json").read_text())["prompt_tokens"] == 400
 
 
+def test_a_cut_off_tool_call_is_refused_and_the_conversation_goes_on(tmp_path: Path) -> None:
+    """pycodestyle's intake on 2026-09-14 ended at reply 38: the model cut a
+    read_file call off mid JSON, the harness ran it with no path, and the endpoint
+    refused every later request over the invalid arguments in the history."""
+    out, draft = _draft_dir(tmp_path)
+    cut = '{"path": "reading? Let\'s read testing/data/W60.py", "count": 80'
+    model = FakeChatModel(
+        [malformed_call("read_file", cut, "c1"), tool_call("submit_proposal", GOOD, "c2")]
+    )
+    outcome = _propose(out, draft, model)
+    assert outcome.turns == 2
+    replies = {m["tool_call_id"]: m["content"] for m in model.requests[-1] if m["role"] == "tool"}
+    assert replies["c1"].startswith("error:") and "not valid JSON" in replies["c1"]
+    assert "W60.py" in replies["c1"] and "is not a file" not in replies["c1"]
+    echoed = next(m for m in model.requests[-1] if m["role"] == "assistant")
+    assert echoed["tool_calls"][0]["function"]["arguments"] == "{}"
+
+
 def test_the_turn_cap_stops_the_conversation_and_keeps_the_messages(tmp_path: Path) -> None:
     out, draft = _draft_dir(tmp_path)
     model = FakeChatModel([text("thinking") for _ in range(5)])
@@ -390,7 +506,6 @@ def test_a_setup_that_cannot_be_a_literal_string_still_round_trips(tmp_path: Pat
         hot_file="widget/core.py",
         alias="w",
         call="w.parse(a)",
-        fingerprint="len(result)",
         tests_module="tests",
         extra_pip=(),
         axis="a",
@@ -402,4 +517,4 @@ def test_a_setup_that_cannot_be_a_literal_string_still_round_trips(tmp_path: Pat
     )
     cfg = parse_config(render.render(draft, proposal, load_config(TEMPLATE), "now"))
     assert cfg.target.inputs[0].setup == setup
-    assert cfg.target.fingerprint == "len(result)"
+    assert "fingerprint" not in render.render(draft, proposal, load_config(TEMPLATE), "now")

@@ -1,0 +1,24 @@
+Cost of grammar.parse_string(data, parse_all=True) on each of the 6 inputs it is timed on,
+at pyparsing efd56db4e59f, the base commit for every attempt.
+
+Absolute times were taken on a referee box and will differ in yours. What
+carries over is the ratio between the inputs and where the time goes.
+'hot self' is the self time spent inside the hot file under cProfile,
+and 'hot share' is its share of all self time. A change with a fixed
+setup cost is free on the slowest input and can be the entire runtime
+of the fastest.
+
+input                 call  hot self hot share  setup
+flat_sequence      0.0292s   0.0511s     58.1%  n = 5000 pieces = [] for i in range(n): if i: pieces.append(pp.Suppress(pp.Literal(';'))) pieces.append(pp.CharsNotIn(';')) grammar = pp.And(pieces) grammar.streamline() data = ";".join(f"v{i}" for i in range(n))
+token_repetition   0.0204s   0.0345s     55.0%  n = 9000 words = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel"] data = " ".join(words[i % 8] for i in range(n)) grammar = pp.OneOrMore(pp.Word(pp.alphas)) grammar.streamline()
+delimited_fields   0.0452s   0.0801s     60.7%  n = 6000 grammar = pp.DelimitedList(pp.CharsNotIn(',')) grammar.streamline() data = ",".join(f"field{i}" for i in range(n))
+record_lines       0.0989s   0.1459s     48.1%  n = 3000 levels = ["INFO", "WARN", "ERROR", "DEBUG"] lines = [] for i in range(n): lines.append(f"{i:06d} [{levels[i % 4]}] message_{i}") data = "\n".join(lines) + "\n" seq = pp.Word(pp.nums, exact=6) level = pp.one_of("INFO WARN ERROR DEBUG") msg = pp.CharsNotIn("\n") line = pp.Group(seq("seq") + pp.Suppress("[") + level("level") + pp.Suppress("] ") + msg("msg")) newline = pp.Literal("\n").leave_whitespace() grammar = pp.OneOrMore(line + pp.Suppress(newline)) grammar.streamline()
+dict_pairs         0.0584s   0.0959s     55.6%  n = 3500 parts = [] for i in range(n): if i % 2: val = str(i) else: val = "val" + chr(97 + (i % 26)) parts.append(f"key{i}:{val}") data = " ".join(parts) key_expr = pp.Word(pp.alphas, pp.alphanums) + pp.Suppress(":") value_expr = pp.Word(pp.nums) | pp.Word(pp.alphas, pp.alphanums) grammar = pp.dict_of(key_expr, value_expr) grammar.streamline()
+recursive_infix    0.3096s   0.4768s     73.2%  import random rnd = random.Random(1234) ops = ["+", "-", "*", "/", "%", "^"] def make_term(depth): if depth >= 3 or rnd.random() < 0.30: return str(rnd.randint(0, 999)) left = make_term(depth + 1) right = make_term(depth + 1) expr = left + " " + rnd.choice(ops) + " " + right if rnd.random() < 0.25: expr = "(" + expr + ")" return expr n = 80 parts = [make_term(0) for _ in range(n)] data = parts[0] for p in parts[1:]: data += " " + rnd.choice(ops) + " " + p integer = pp.Word(pp.nums) grammar = pp.infix_notation( integer, [ (pp.one_of("^"), 2, pp.OpAssoc.RIGHT), (pp.one_of("* / %"), 2, pp.OpAssoc.LEFT), (pp.one_of("+ -"), 2, pp.OpAssoc.LEFT), ], ) grammar.streamline()
+
+geometric mean of the hot file's share: 58.0%
+
+The call spans 15x between recursive_infix and token_repetition.
+
+The flat and caller profiles in the other two documents are of the first
+input only.

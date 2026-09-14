@@ -1,9 +1,12 @@
 """One round: fan out the workers, measure every patch, append everything.
 
-The round is the unit of history. Every worker in it sees the same history and
-starts from the same base commit, and none sees another's patch until the round
-is over. The orchestrator is the only writer: attempts are written once and
-measurements once. Nothing is merged. Every patch, including one that fails
+The round is the unit of history. Every worker in it starts from the same base
+commit, and none sees another's patch until the round is over. Every worker sees
+the same history too, except in the hidden leader experiment, where the top
+``[worker].hidden_slots`` slots are not shown the leader set (the best attempt
+and its near copies, ``history.leader_set``); what each slot saw is written in
+its input record. The orchestrator is the only writer: attempts are written once
+and measurements once. Nothing is merged. Every patch, including one that fails
 tests or is slower, is measured in full and recorded, because it is context for
 the next worker.
 
@@ -85,20 +88,30 @@ def run_round(
     seen_hashes = {normalised_hash(a.patch): a.ref.dirname for a in past if a.patch}
 
     # Slot w runs prompt version prompts[w % len(prompts)]. The cache key carries
-    # the version, since each version is its own cached prefix.
+    # the version, since each version is its own cached prefix, and whether the
+    # slot is hidden, since a hidden slot's first message is its own prefix too.
     versions = config.worker.prompts
-    inputs = [
-        WorkerInput(
-            ref=AttemptRef(number=first_number + w, round=round_no, worker=w),
-            base_sha=base_sha,
-            target=target,
-            history=past,
-            docs=docs,
-            cache_key=f"{config.run_id}-{config.config_hash}-{versions[w % len(versions)]}",
-            prompt=versions[w % len(versions)],
+    withheld = history.leader_set(past) if config.worker.hidden_slots else frozenset()
+    visible = tuple(a for a in past if a.ref.number not in withheld)
+    # Tests build configs with replace(), so the width can be below the setting.
+    first_hidden = max(0, config.width - config.worker.hidden_slots)
+    inputs: list[WorkerInput] = []
+    for w in range(config.width):
+        hidden = w >= first_hidden
+        version = versions[w % len(versions)]
+        inputs.append(
+            WorkerInput(
+                ref=AttemptRef(number=first_number + w, round=round_no, worker=w),
+                base_sha=base_sha,
+                target=target,
+                history=visible if hidden else past,
+                docs=docs,
+                cache_key=f"{config.run_id}-{config.config_hash}-{version}"
+                + ("-hidden" if hidden else ""),
+                prompt=version,
+                hidden_numbers=tuple(sorted(withheld)) if hidden else (),
+            )
         )
-        for w in range(config.width)
-    ]
 
     # 1. Workers, concurrently. Each creates and destroys its own box.
     t0 = time.perf_counter()
@@ -125,7 +138,8 @@ def run_round(
             base_sha,
             {
                 "config_hash": config.config_hash,
-                "history_numbers": [a.ref.number for a in past],
+                "history_numbers": [a.ref.number for a in inp.history],
+                "hidden_numbers": list(inp.hidden_numbers),
                 "cache_key": inp.cache_key,
                 "prompt": inp.prompt,
             },

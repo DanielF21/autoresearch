@@ -1,0 +1,284 @@
+# pycodestyle: written by autoresearch intake propose at 2026-09-14 07:03:34.
+# Run `autoresearch next configs/pycodestyle_w16.toml` for the step it is at.
+#
+# input axis: syntax shape from statement-token dense through nested and continuation-
+#             heavy code to literal-dense code
+# why it matters: pycodestyle spends its time in different check functions depending on
+#                 the shape of the checked source. Flat assignment-heavy files exercise
+#                 build_tokens_line and token-loop checks (missing_whitespace,
+#                 whitespace_around_operator, whitespace_around_named_parameter_equals).
+#                 Top-level def and method/class files spend much more time in
+#                 blank_lines and indentation, including the nested-definition backward
+#                 scan. Bracket-heavy multiline files are dominated by
+#                 continued_indentation over long token runs. Docstring/comment-heavy
+#                 files are dominated by maximum_doc_length and multiline physical-line
+#                 checks. Escape-literal files are dominated by
+#                 python_3000_invalid_escape_sequence and mute_string. An optimization
+#                 that speeds one geometry (for example caching token-walk state for
+#                 continued_indentation, or special-casing blank_lines) may do nothing
+#                 for the others and can regress them, so the set catches
+#                 specialization.
+
+[run]
+run_id = "pycodestyle_w16"
+width = 16
+rounds = 16
+
+[target]
+name = "pycodestyle"
+repo = "https://github.com/PyCQA/pycodestyle"
+sha = "d6c38543a95c3adec7958fc659f4081972a3f1d1"
+package = "pycodestyle"
+alias = "pycodestyle"
+package_root = "."
+hot_file = "pycodestyle.py"
+call = "pycodestyle.Checker(lines=SRC_LINES, options=OPTIONS).check_all()"
+pip = ["covdefaults", "coverage"]
+allow = ["pycodestyle.py"]
+deny = ["tests/**", "docs/**"]
+fingerprint = ""
+docs = ["configs/seeded/docs/pycodestyle_w16/profile_inputs.txt", "configs/seeded/docs/pycodestyle_w16/profile_flat_assignments_flat.txt", "configs/seeded/docs/pycodestyle_w16/profile_flat_assignments_callers.txt"]
+
+[target.tests]
+module = "tests"
+full = "tests"
+
+# regime: statement-token dense and flat: many short top-level logical lines, no
+#         indentation or continuation
+# why: Drives build_tokens_line and the logical token-loop/regex checks on many simple
+#      logical lines, with seeded E225/E231/E251/E501/W291 violations for varying
+#      results.
+[[target.inputs]]
+name = "flat_assignments"
+noise_floor = 1.0188   # calibrated 20260914-070504, 42 null pairs
+setup = '''
+import random
+NL = chr(10)
+SQ = chr(39)
+rng = random.Random(SEED)
+letters = 'abcdefghijklmnopqrstuvwxyz'
+long_word = ''.join(rng.choice(letters) for _ in range(80))
+lines = ['import os' + NL, 'import sys' + NL, NL]
+N = 5000
+for i in range(N):
+    typ = rng.randrange(6)
+    if typ == 0:
+        lines.append(f'value_{i} = helper_{i}(arg_{i}, {i}){NL}')
+    elif typ == 1:
+        lines.append(f'value_{i}=helper_{i}(arg_{i}, {i}){NL}')
+    elif typ == 2:
+        lines.append(f'value_{i} = helper_{i}(arg_{i}, factor = {i}){NL}')
+    elif typ == 3:
+        lines.append(f'value_{i} = helper_{i}({i},{i}){NL}')
+    elif typ == 4:
+        lines.append(f'value_{i} = helper_{i}(arg_{i}, {i}) {NL}')
+    else:
+        lines.append(f'value_{i} = helper_{i}(arg_{i}, {SQ}{long_word}{i}_{SEED}{SQ}){NL}')
+lines.append(NL)
+lines.append(NL)
+for _ in range(17 + (SEED % 3) + (SEED % 5) + (SEED % 7)):
+    lines.append(f'tail_{SEED}_{_}=1{NL}')
+OPTIONS = pycodestyle.StyleGuide(quiet=True, select=['E', 'W'], max_line_length=79, max_doc_length=72, indent_size=4).options
+SRC_LINES = lines
+'''
+
+# regime: top-level function definitions with varied blank-line counts
+# why: Exercises the top-level branch of blank_lines, STARTSWITH_TOP_LEVEL_REGEX, and
+#      _is_one_liner on many def logical lines.
+[[target.inputs]]
+name = "top_level_defs"
+noise_floor = 1.0150   # calibrated 20260914-070504, 42 null pairs
+setup = '''
+import random
+NL = chr(10)
+rng = random.Random(SEED)
+lines = ['import sys' + NL, NL, NL]
+N = 2200
+for i in range(N):
+    if i == 0:
+        blanks = 0
+    else:
+        kind = (i + SEED * 5) % 6
+        if kind in (0, 1):
+            blanks = 2
+        elif kind in (2, 3):
+            blanks = 0
+        elif kind == 4:
+            blanks = 1
+        else:
+            blanks = 3
+    lines.extend([NL] * blanks)
+    lines.append(f'def function_{SEED}_{i}(alpha_{i}):{NL}')
+    lines.append(f'    return alpha_{i} + {i}{NL}')
+lines.append(NL)
+lines.append(NL)
+for _ in range(17 + (SEED % 3) + (SEED % 5) + (SEED % 7)):
+    lines.append(f'tail_{SEED}_{_}=1{NL}')
+OPTIONS = pycodestyle.StyleGuide(quiet=True, select=['E', 'W'], max_line_length=79, max_doc_length=72, indent_size=4).options
+SRC_LINES = lines
+'''
+
+# regime: indented method definitions inside classes
+# why: Drives the nested/method branch of blank_lines, especially its backward scan for
+#      a def ancestor, plus indentation and seeded W291 trailing whitespace.
+[[target.inputs]]
+name = "method_bodies"
+noise_floor = 1.0311   # calibrated 20260914-070504, 42 null pairs
+setup = '''
+import random
+NL = chr(10)
+rng = random.Random(SEED)
+lines = ['import sys' + NL, NL, NL]
+N_CLASSES = 350
+METHODS = 8
+for i in range(N_CLASSES):
+    if i:
+        lines.extend([NL, NL])
+    lines.append(f'class Class_{SEED}_{i}:{NL}')
+    for j in range(METHODS):
+        if j == 0:
+            blanks = 0
+        else:
+            kind = (i * METHODS + j + SEED * 7) % 5
+            if kind in (0, 1):
+                blanks = 0
+            elif kind in (2, 3):
+                blanks = 1
+            else:
+                blanks = 2
+        lines.extend([NL] * blanks)
+        lines.append(f'    def method_{SEED}_{i}_{j}(self):{NL}')
+        if (i + j + SEED) % 3 == 0:
+            lines.append(f'        return shard_{i}_{j} {NL}')
+        else:
+            lines.append(f'        return shard_{i}_{j}{NL}')
+lines.append(NL)
+lines.append(NL)
+for _ in range(17 + (SEED % 3) + (SEED % 5) + (SEED % 7)):
+    lines.append(f'tail_{SEED}_{_}=1{NL}')
+OPTIONS = pycodestyle.StyleGuide(quiet=True, select=['E', 'W'], max_line_length=79, max_doc_length=72, indent_size=4).options
+SRC_LINES = lines
+'''
+
+# regime: continuation-heavy bracketed expressions; one logical line spans many physical
+#         lines
+# why: Makes continued_indentation walk many tokens per logical line through open-
+#      bracket state, and also exercises break_before/break_after_binary_operator.
+[[target.inputs]]
+name = "multiline_bracketed"
+noise_floor = 1.0102   # calibrated 20260914-070504, 42 null pairs
+setup = '''
+import random
+NL = chr(10)
+rng = random.Random(SEED)
+lines = ['import sys' + NL, NL, NL]
+N = 1000
+for i in range(N):
+    lines.append(f'value_{SEED}_{i} = function_{SEED}_{i}({NL}')
+    pattern = rng.choice([(4, 4, 4, 4), (2, 2, 2, 2), (8, 8, 8, 8), (4, 8, 4, 8), (8, 4, 8, 4)])
+    for k, indent in enumerate(pattern):
+        lines.append(' ' * indent + f'argument_{i}_{SEED}_{k},{NL}')
+    lines.append(f'){NL}')
+lines.append(NL)
+lines.append(NL)
+for _ in range(17 + (SEED % 3) + (SEED % 5) + (SEED % 7)):
+    lines.append(f'tail_{SEED}_{_}=1{NL}')
+OPTIONS = pycodestyle.StyleGuide(quiet=True, select=['E', 'W'], max_line_length=79, max_doc_length=72, indent_size=4).options
+SRC_LINES = lines
+'''
+
+# regime: literal/comment-dense multiline docstrings
+# why: Exercises the logical maximum_doc_length path over multiline STRING tokens and
+#      the multiline exceptions in maximum_line_length, with seeded long and short doc
+#      lines.
+[[target.inputs]]
+name = "long_docstrings"
+noise_floor = 1.0134   # calibrated 20260914-070504, 42 null pairs
+setup = '''
+import random
+NL = chr(10)
+SQ = chr(39)
+rng = random.Random(SEED)
+letters = 'abcdefghijklmnopqrstuvwxyz'
+TQ = SQ * 3
+def make_text(n_words):
+    return ' '.join(''.join(rng.choice(letters) for _ in range(7)) for _ in range(n_words))
+lines = ['import sys' + NL, NL, NL]
+N = 800
+for i in range(N):
+    if i:
+        lines.extend([NL, NL])
+    lines.append(f'def document_{SEED}_{i}():{NL}')
+    lines.append('    ' + TQ + 'module documentation string' + NL)
+    for _ in range(3):
+        if rng.randrange(3) != 0:
+            lines.append(make_text(10) + NL)
+        else:
+            lines.append(make_text(5) + NL)
+    lines.append('    ' + TQ + NL)
+    lines.append(f'    return value_{SEED}_{i}{NL}')
+lines.append(NL)
+lines.append(NL)
+for _ in range(17 + (SEED % 3) + (SEED % 5) + (SEED % 7)):
+    lines.append(f'tail_{SEED}_{_}=1{NL}')
+OPTIONS = pycodestyle.StyleGuide(quiet=True, select=['E', 'W'], max_line_length=79, max_doc_length=72, indent_size=4).options
+SRC_LINES = lines
+'''
+
+# regime: literal-dense single-line string tokens with invalid escape sequences
+# why: Drives python_3000_invalid_escape_sequence scanning string token text and the
+#      mute_string path in build_tokens_line.
+[[target.inputs]]
+name = "string_literals"
+noise_floor = 1.0317   # calibrated 20260914-070504, 42 null pairs
+setup = '''
+import random
+NL = chr(10)
+SQ = chr(39)
+BS = chr(92)
+rng = random.Random(SEED)
+letters = 'abcdefghijklmnopqrstuvwxyz'
+junk = ''.join(rng.choice(letters) for _ in range(16))
+lines = ['import sys' + NL, NL, NL]
+N = 5000
+for i in range(N):
+    if (i + SEED * 3) % 4 != 0:
+        lines.append(f's_{SEED}_{i} = {SQ}prefix{BS}q_{junk}_{i}_suffix{SQ}{NL}')
+    else:
+        lines.append(f's_{SEED}_{i} = {SQ}prefix_{junk}_{i}_suffix{SQ}{NL}')
+lines.append(NL)
+lines.append(NL)
+for _ in range(17 + (SEED % 3) + (SEED % 5) + (SEED % 7)):
+    lines.append(f'tail_{SEED}_{_}=1{NL}')
+OPTIONS = pycodestyle.StyleGuide(quiet=True, select=['E', 'W'], max_line_length=79, max_doc_length=72, indent_size=4).options
+SRC_LINES = lines
+'''
+
+[worker]
+model = "deepseek/deepseek-v4-pro-0813"
+reasoning_effort = "high"
+completion_window = "asap"
+max_turns = 240
+max_seconds = 10800
+max_input_tokens = 24000000
+turn_timeout = 600
+
+[referee]
+pairs = 6
+repeats_per_launch = 7
+min_clean_pairs = 4
+hash_seeds = [0, 1, 2, 3, 4]
+
+[boxes]
+worker_size = "m"
+referee_size = "m"
+control_size = "s"
+disk_gib = 32
+
+[storage]
+volume = "autoresearch"
+mount = "/mnt/autoresearch"
+
+[observe]
+enabled = true
+session_prefix = ""

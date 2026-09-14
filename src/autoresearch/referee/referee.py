@@ -18,6 +18,13 @@ as a 1.4 second one; artifacts/generality.md has the measurements that led to
 both. An input with no floor yet cannot be measured, only calibrated, and
 ``measure`` refuses it by name.
 
+Each input is a family of instances, picked by the ``SEED`` its setup reads.
+The worker is shown seed 0. The referee verifies and times seed 0 and one
+held out seed drawn fresh for every measurement, and the held out ratio is the
+input's score: a patch that recognises the instance it was shown is then
+recorded as ``overfit`` rather than as a speedup. A setup that does not read
+``SEED`` is one point in input space, and ``measure`` refuses it by name too.
+
 Nothing stops early. A step that fails records its failure in ``errors`` and the
 next step still runs, with one exception, per input: an input the patched tree
 cannot complete a verify call on is not timed, because a patch that hangs or
@@ -57,6 +64,7 @@ from autoresearch.types import (
 
 GUEST_SOURCE = Path(__file__).parent.parent / "guest"
 PIN_CORE = 2  # the core every Phase 1 timing ran on
+SHOWN_SEED = timing.SHOWN_SEED
 
 TESTS_TIMEOUT = 1200
 LAUNCH_TIMEOUT = 600
@@ -80,6 +88,8 @@ class _Launch:
     contaminated: bool
     reasons: tuple[str, ...]
     fixed_s: float | None
+    first_s: float | None = None  # the first call; None from a guest that predates it
+    warm_s: float | None = None  # the best of the calls after the first
 
 
 @dataclass(frozen=True)
@@ -101,10 +111,20 @@ class InputSurvey:
     fixed_s: float | None = None
     python: str = ""
     fingerprints: tuple[str, str] = ("", "")
+    # One launch at a seed the worker is never shown: what its result and its
+    # call cost look like there, so the check can see that the seed matters.
+    held_out_seed: int = 0
+    held_out_fp: str = ""
+    held_out_call_s: float = 0.0
 
     @property
     def deterministic(self) -> bool:
         return not self.error and self.fingerprints[0] == self.fingerprints[1]
+
+    @property
+    def seed_matters(self) -> bool:
+        """The held out instance computes something the shown one does not."""
+        return not self.error and self.held_out_fp != self.fingerprints[0]
 
 
 @dataclass(frozen=True)
@@ -143,13 +163,14 @@ def guest_command(script: str, *args: str, pin: int | None = None) -> str:
     return f"cd {GUEST_DIR} && {prefix}python3 {script} {quoted}"
 
 
-def target_args(target: TargetSpec, tree: str, spec: BenchmarkInput) -> list[str]:
+def target_args(target: TargetSpec, tree: str, spec: BenchmarkInput, seed: int) -> list[str]:
     """Every fact time_target.py needs about the target, as its flags.
 
     One place, used by the referee and by the worker's benchmark tool, so the
-    two cannot drift into timing different things.
+    two cannot drift into timing different things. ``seed`` is which instance
+    of the input the setup builds; every caller names the one it means.
     """
-    args = [
+    return [
         "--root",
         tree,
         "--package",
@@ -164,27 +185,46 @@ def target_args(target: TargetSpec, tree: str, spec: BenchmarkInput) -> list[str
         target.call,
         "--hot",
         target.hot_file,
+        "--seed",
+        str(seed),
     ]
-    if target.fingerprint:
-        args += ["--fingerprint", target.fingerprint]
-    return args
 
 
 class _InputFacts:
-    """One input's timing under construction, in the order the referee learns it."""
+    """One input's timing under construction, in the order the referee learns it.
 
-    def __init__(self, spec: BenchmarkInput) -> None:
+    ``seed`` is the held out instance, drawn when the measurement starts. The
+    shown instance's fingerprints are ``base_fp`` and ``patched_fp``; the held
+    out instance's are the ``held_out_*`` pair; ``pairs`` and ``speedup`` are
+    the held out timing, the score, and ``shown_*`` the shown timing beside it.
+    """
+
+    def __init__(self, spec: BenchmarkInput, seed: int) -> None:
         if spec.noise_floor is None:
             raise ValueError(f"input {spec.name!r} has no noise floor; calibrate it first")
         self.spec = spec
         self.noise_floor: float = spec.noise_floor
+        self.seed = seed
         self.base_fp = ""
         self.patched_fp = ""
+        self.held_out_base_fp = ""
+        self.held_out_patched_fp = ""
         self.pairs: tuple[PairTiming, ...] = ()
         self.speedup: float | None = None
+        self.shown_pairs: tuple[PairTiming, ...] = ()
+        self.shown_speedup: float | None = None
         self.retried = False
         self.retries = 0
+        self.memoized = False
+        self.overfit = False
         self.errors: list[str] = []
+
+    @property
+    def verified(self) -> bool:
+        """Both trees ran both instances, so the input can be timed."""
+        return bool(
+            self.base_fp and self.patched_fp and self.held_out_base_fp and self.held_out_patched_fp
+        )
 
     def finish(self) -> InputTiming:
         return InputTiming(
@@ -197,20 +237,30 @@ class _InputFacts:
             retried=self.retried,
             errors=tuple(self.errors),
             retries=self.retries,
+            memoized=self.memoized,
+            seed=self.seed,
+            shown_pairs=self.shown_pairs,
+            shown_speedup=self.shown_speedup,
+            held_out_base_fp=self.held_out_base_fp,
+            held_out_patched_fp=self.held_out_patched_fp,
+            overfit=self.overfit,
         )
 
 
 class _Facts:
     """The measurement under construction. Mutable only inside ``measure``."""
 
-    def __init__(self, inputs: tuple[BenchmarkInput, ...], box_id: str) -> None:
+    def __init__(
+        self, inputs: tuple[BenchmarkInput, ...], box_id: str, draw: Callable[[], int]
+    ) -> None:
         self.box_id = box_id
         self.applied = False
         self.apply_error = ""
         self.scope: tuple[str, ...] = ()
         self.tests: list[SuiteResult] = []
         self.canary: float | None = None
-        self.inputs = [_InputFacts(spec) for spec in inputs]
+        # One held out seed per input, drawn now so the record can name it.
+        self.inputs = [_InputFacts(spec, draw()) for spec in inputs]
         self.errors: list[str] = []
 
     def finish(self, wall_s: float) -> Measurement:
@@ -228,9 +278,12 @@ class _Facts:
 
 
 class Referee:
-    def __init__(self, box: Box, config: RunConfig) -> None:
+    def __init__(
+        self, box: Box, config: RunConfig, draw_seed: Callable[[], int] = timing.draw_seed
+    ) -> None:
         self._box = box
         self._config = config
+        self._draw_seed = draw_seed
         self._broken = ""
 
     @property
@@ -269,7 +322,13 @@ class Referee:
             raise ValueError(
                 "cannot measure with uncalibrated inputs: " + ", ".join(target.uncalibrated)
             )
-        facts = _Facts(target.inputs, self._box.box_id)
+        if target.unseeded:
+            raise ValueError(
+                "cannot measure inputs whose setup does not read SEED: "
+                + ", ".join(target.unseeded)
+                + "; a setup that ignores it is one point, and a patch can recognise one point"
+            )
+        facts = _Facts(target.inputs, self._box.box_id, self._draw_seed)
 
         files = changed_files(patch)
         facts.scope = tuple(
@@ -309,7 +368,7 @@ class Referee:
             for inp in facts.inputs:
                 self._verify_input(facts, inp)
 
-            timeable = [i for i in facts.inputs if i.base_fp and i.patched_fp]
+            timeable = [i for i in facts.inputs if i.verified]
             if not timeable:
                 return facts.finish(time.perf_counter() - t0)
 
@@ -346,7 +405,9 @@ class Referee:
         timing spread, and the launches are what the time is worth spending on.
 
         ``rounds`` is how many times each input's full set of pairs is run, so an
-        input comes back with ``rounds * referee.pairs`` of them.
+        input comes back with ``rounds * referee.pairs`` of them. Each round is
+        timed on a held out seed of its own, drawn as ``measure`` draws them, so
+        the floor is the family's and not one instance's.
         """
         target = self._config.target
         specs = [i for i in target.inputs if not only or i.name in only]
@@ -358,11 +419,12 @@ class Referee:
             self._worktree(BASE_TREE, target.sha, patch_file=None)
             self._worktree(PATCHED_TREE, target.sha, patch_file=None)
             for spec in specs:
-                self._verify(BASE_TREE, spec)
-                self._verify(PATCHED_TREE, spec)
+                self._verify(BASE_TREE, spec, SHOWN_SEED)
+                self._verify(PATCHED_TREE, spec, SHOWN_SEED)
             for _ in range(rounds):
+                seed = self._draw_seed()
                 for spec in specs:
-                    out[spec.name].extend(self._time_pairs(spec))
+                    out[spec.name].extend(self._time_pairs(spec, seed))
                     if progress is not None:
                         progress(spec.name, len(out[spec.name]))
         finally:
@@ -372,10 +434,12 @@ class Referee:
     def survey(self) -> Survey:
         """Every fact about the target on the base tree alone, with no patch.
 
-        What the check command reads: each input verified twice, so a result
-        that is not deterministic shows as two fingerprints, and both suites
-        run once. Nothing here needs a noise floor, so an uncalibrated target
-        can be surveyed, which is the point: this is how a candidate target is
+        What the check command reads: each input verified twice at the shown
+        seed, so a result that is not deterministic shows as two fingerprints,
+        once more at a held out seed, so a result that does not depend on the
+        instance shows as the same fingerprint again, and both suites run
+        once. Nothing here needs a noise floor, so an uncalibrated target can be
+        surveyed, which is the point: this is how a candidate target is
         accepted or refused before anything is calibrated or run.
         """
         target = self._config.target
@@ -411,9 +475,10 @@ class Referee:
         try:
             self._worktree(BASE_TREE, target.sha, patch_file=None)
             for spec in target.inputs:
+                # The shown instance: the documents describe what the worker sees.
                 rec = self._guest(
                     "time_target.py",
-                    *self._target_args(BASE_TREE, spec),
+                    *self._target_args(BASE_TREE, spec, SHOWN_SEED),
                     "--profile",
                     timeout=LAUNCH_TIMEOUT,
                 )
@@ -435,9 +500,11 @@ class Referee:
         return tuple(out)
 
     def _survey_input(self, spec: BenchmarkInput) -> InputSurvey:
+        seed = self._draw_seed()
         try:
-            first = self._verify_record(BASE_TREE, spec)
-            second = self._verify_record(BASE_TREE, spec)
+            first = self._verify_record(BASE_TREE, spec, SHOWN_SEED)
+            second = self._verify_record(BASE_TREE, spec, SHOWN_SEED)
+            held_out = self._verify_record(BASE_TREE, spec, seed)
         except GuestError as e:
             return InputSurvey(name=spec.name, error=str(e))
         return InputSurvey(
@@ -450,49 +517,108 @@ class Referee:
             fixed_s=None if first.get("fixed_s") is None else float(first.get("fixed_s")),
             python=".".join(str(v) for v in first.get("python", [])),
             fingerprints=(str(first.get("result_fp")), str(second.get("result_fp"))),
+            held_out_seed=seed,
+            held_out_fp=str(held_out.get("result_fp")),
+            held_out_call_s=float(held_out.get("call_s", 0.0)),
         )
 
     def _verify_input(self, facts: _Facts, inp: _InputFacts) -> None:
-        """One verify call per tree. A failure on either leaves this input untimed."""
-        self._step(
-            facts,
-            f"verify base {inp.spec.name}",
-            lambda: setattr(inp, "base_fp", self._verify(BASE_TREE, inp.spec)),
+        """One verify call per tree per instance. A failure on any leaves this input untimed.
+
+        The held out instance is verified as well as timed: a patch that
+        computes the right answer on the instance it was shown and the wrong
+        one on the instance it was not has computed the wrong thing.
+        """
+        name = inp.spec.name
+        plan = (
+            ("base_fp", BASE_TREE, SHOWN_SEED, f"verify base {name}"),
+            ("patched_fp", PATCHED_TREE, SHOWN_SEED, f"verify patched {name}"),
+            ("held_out_base_fp", BASE_TREE, inp.seed, f"verify base {name} at seed {inp.seed}"),
+            (
+                "held_out_patched_fp",
+                PATCHED_TREE,
+                inp.seed,
+                f"verify patched {name} at seed {inp.seed}",
+            ),
         )
-        ok = self._step(
-            facts,
-            f"verify patched {inp.spec.name}",
-            lambda: setattr(inp, "patched_fp", self._verify(PATCHED_TREE, inp.spec)),
-        )
-        if not ok:
-            inp.errors.append("timing skipped: patched tree cannot run this input")
+        for attr, tree, seed, label in plan:
+            ok = self._step(
+                facts,
+                label,
+                # Bound by partial, not closed over: _step runs it at once, but a
+                # closure over the loop variables would be wrong if it did not.
+                partial(self._verify_into, inp, attr, tree, seed),
+            )
+            if not ok and tree == PATCHED_TREE:
+                inp.errors.append(
+                    "timing skipped: patched tree cannot run this input"
+                    + ("" if seed == SHOWN_SEED else f" at seed {seed}")
+                )
+
+    def _verify_into(self, inp: _InputFacts, attr: str, tree: str, seed: int) -> None:
+        setattr(inp, attr, self._verify(tree, inp.spec, seed))
 
     def _time_input(self, inp: _InputFacts) -> None:
-        """Six pairs, retried up to ``timing_retries`` times if too few came back clean.
+        """Six pairs on the held out instance, then six on the shown one.
 
-        Each retry replaces the pass before it rather than adding to it, so only
-        the last pass is recorded. ``retries`` says how many happened: without it
-        a retry is invisible in the record and shows up only as unexplained wall
-        clock, which is what attempt 0009 of t1_w4b turned out to be. An input
-        still short of clean pairs after the last retry is left untimed, and the
-        measurement then cannot clear the noise floor.
+        Each pass is retried up to ``timing_retries`` times if too few pairs came
+        back clean, and each retry replaces the pass before it rather than adding
+        to it, so only the last pass is recorded. ``retries`` says how many
+        happened: without it a retry is invisible in the record and shows up only
+        as unexplained wall clock, which is what attempt 0009 of t1_w4b turned out
+        to be. An input still short of clean pairs after the last retry on the held
+        out instance is left untimed, and the measurement then cannot clear the
+        noise floor. The shown instance is timed for the comparison only: a shown
+        ratio far above the held out one is a patch that recognised its input.
         """
         cfg = self._config.referee
-        pairs = self._time_pairs(inp.spec)
-        while (
-            not timing.enough_clean(pairs, cfg.min_clean_pairs) and inp.retries < cfg.timing_retries
-        ):
-            inp.retries += 1
-            pairs = self._time_pairs(inp.spec)
-        inp.retried = inp.retries > 0
+        pairs, retries = self._pairs_with_retries(inp.spec, inp.seed)
+        inp.retries = retries
+        inp.retried = retries > 0
         inp.pairs = pairs
         if not timing.enough_clean(pairs, cfg.min_clean_pairs):
             inp.errors.append(
                 f"only {len(timing.clean_pairs(pairs))} clean pairs of {cfg.pairs} after "
-                f"{inp.retries} retries; untimed, so this attempt cannot clear the noise floor"
+                f"{retries} retries; untimed, so this attempt cannot clear the noise floor"
             )
             return
         inp.speedup = timing.median_ratio(pairs)
+        inp.memoized = timing.memoized(pairs)
+        if inp.memoized:
+            inp.errors.append(
+                "memoized: on the patched tree the calls after the first ran more than "
+                f"{timing.MEMO_FACTOR:.0f}x faster than the first, and not on the base tree; "
+                "a result cache is not a speedup, so this attempt cannot clear the noise floor"
+            )
+        shown, shown_retries = self._pairs_with_retries(inp.spec, SHOWN_SEED)
+        inp.retries += shown_retries
+        inp.retried = inp.retries > 0
+        inp.shown_pairs = shown
+        if not timing.enough_clean(shown, cfg.min_clean_pairs):
+            inp.errors.append(
+                f"shown instance: only {len(timing.clean_pairs(shown))} clean pairs of "
+                f"{cfg.pairs} after {shown_retries} retries; the overfit comparison is skipped"
+            )
+            return
+        inp.shown_speedup = timing.median_ratio(shown)
+        inp.overfit = timing.overfit(inp.shown_speedup, inp.speedup, inp.noise_floor)
+        if inp.overfit:
+            inp.errors.append(
+                f"overfit: {inp.shown_speedup:.1f}x on the instance the worker was shown, "
+                f"{inp.speedup:.2f}x on a held out one; a patch that recognises the benchmark "
+                "is not a speedup, so this attempt cannot clear the noise floor"
+            )
+
+    def _pairs_with_retries(
+        self, spec: BenchmarkInput, seed: int
+    ) -> tuple[tuple[PairTiming, ...], int]:
+        cfg = self._config.referee
+        retries = 0
+        pairs = self._time_pairs(spec, seed)
+        while not timing.enough_clean(pairs, cfg.min_clean_pairs) and retries < cfg.timing_retries:
+            retries += 1
+            pairs = self._time_pairs(spec, seed)
+        return pairs, retries
 
     def _step(self, facts: _Facts, name: str, run: Any) -> bool:
         """Run one step. A guest failure is a recorded fact; a box failure propagates."""
@@ -551,64 +677,84 @@ class Referee:
             str(TESTS_TIMEOUT - 60),
             timeout=TESTS_TIMEOUT,
         )
+        ok = bool(rec.get("ok", False))
         return SuiteResult(
             scope=scope,
             passed=int(rec.get("passed", 0)),
             failed=int(rec.get("failed", 0)),
             errors=int(rec.get("errors", 0)),
             duration_s=float(rec.get("duration_s", 0.0)),
-            ok=bool(rec.get("ok", False)),
+            ok=ok,
+            failures="" if ok else str(rec.get("tail", "")),
         )
 
-    def _target_args(self, tree: str, spec: BenchmarkInput) -> list[str]:
-        return target_args(self._config.target, tree, spec)
+    def _target_args(self, tree: str, spec: BenchmarkInput, seed: int) -> list[str]:
+        return target_args(self._config.target, tree, spec, seed)
 
-    def _verify_record(self, tree: str, spec: BenchmarkInput) -> GuestRecord:
+    def _verify_record(self, tree: str, spec: BenchmarkInput, seed: int) -> GuestRecord:
         rec = self._guest(
-            "time_target.py", *self._target_args(tree, spec), "--verify", timeout=LAUNCH_TIMEOUT
+            "time_target.py",
+            *self._target_args(tree, spec, seed),
+            "--verify",
+            timeout=LAUNCH_TIMEOUT,
         )
         if rec.get("error"):
-            raise GuestError(f"verify failed on {tree} for {spec.name}: {rec.get('error')}")
+            raise GuestError(
+                f"verify failed on {tree} for {spec.name} at seed {seed}: {rec.get('error')}"
+            )
         return rec
 
-    def _verify(self, tree: str, spec: BenchmarkInput) -> str:
-        rec = self._verify_record(tree, spec)
+    def _verify(self, tree: str, spec: BenchmarkInput, seed: int) -> str:
+        rec = self._verify_record(tree, spec, seed)
         if not rec.get("hot_executed"):
-            raise GuestError(f"hot file did not execute on {tree} for {spec.name}")
+            raise GuestError(f"hot file did not execute on {tree} for {spec.name} at seed {seed}")
         return str(rec.get("result_fp"))
 
     def _canary(self) -> float:
         rec = self._guest("canary.py", "--repeats", "5", timeout=LAUNCH_TIMEOUT)
         return float(rec.get("min_s"))
 
-    def _launch(self, tree: str, spec: BenchmarkInput, seed: int) -> _Launch:
+    def _launch(self, tree: str, spec: BenchmarkInput, hash_seed: int, seed: int) -> _Launch:
         rec = self._guest(
             "time_target.py",
-            *self._target_args(tree, spec),
+            *self._target_args(tree, spec, seed),
             "--repeats",
             str(self._config.referee.repeats_per_launch),
             "--label",
             f"{spec.name}/{tree.rsplit('/', 1)[-1]}",
             timeout=LAUNCH_TIMEOUT,
-            env={"PYTHONHASHSEED": str(seed)},
+            env={"PYTHONHASHSEED": str(hash_seed)},
             pin=PIN_CORE,
         )
         if rec.get("error"):
-            raise GuestError(f"timing launch failed on {tree} for {spec.name}: {rec.get('error')}")
+            raise GuestError(
+                f"timing launch failed on {tree} for {spec.name} at seed {seed}: {rec.get('error')}"
+            )
         fixed = rec.get("fixed_s")
         fixed_s = None if fixed is None else float(fixed)
+        first = rec.get("first_s")
+        warm = rec.get("warm_s")
+        first_s = None if first is None else float(first)
+        warm_s = None if warm is None else float(warm)
         clean = rec.get("min_clean")
         reasons: list[str] = []
         for s in rec.get("samples", []):
             reasons.extend(s.get("reasons", []))
         if clean is None:
-            return _Launch(float(rec.get("min_all")), True, tuple(sorted(set(reasons))), fixed_s)
-        return _Launch(float(clean), False, (), fixed_s)
+            return _Launch(
+                float(rec.get("min_all")),
+                True,
+                tuple(sorted(set(reasons))),
+                fixed_s,
+                first_s,
+                warm_s,
+            )
+        return _Launch(float(clean), False, (), fixed_s, first_s, warm_s)
 
-    def _time_pairs(self, spec: BenchmarkInput) -> tuple[PairTiming, ...]:
-        """One input's pairs. The two launches of a pair are back to back so
-        machine drift affects both and cancels, which is why every input gets
-        its own pairs rather than sharing a launch."""
+    def _time_pairs(self, spec: BenchmarkInput, seed: int) -> tuple[PairTiming, ...]:
+        """One input's pairs on one instance. The two launches of a pair are back
+        to back so machine drift affects both and cancels, which is why every
+        input gets its own pairs rather than sharing a launch."""
         cfg = self._config.referee
         out: list[PairTiming] = []
         for plan in timing.plan_pairs(cfg.pairs, cfg.hash_seeds):
@@ -617,7 +763,7 @@ class Referee:
             reasons: tuple[str, ...] = ()
             for which in plan.sequence:
                 tree = BASE_TREE if which == "base" else PATCHED_TREE
-                launch = self._launch(tree, spec, plan.hash_seed)
+                launch = self._launch(tree, spec, plan.hash_seed, seed)
                 launches[which] = launch
                 contaminated = contaminated or launch.contaminated
                 reasons = tuple(sorted(set(reasons) | set(launch.reasons)))
@@ -626,12 +772,17 @@ class Referee:
                     index=plan.index,
                     order=plan.order,
                     hash_seed=plan.hash_seed,
+                    seed=seed,
                     base_s=launches["base"].seconds,
                     patched_s=launches["patched"].seconds,
                     contaminated=contaminated,
                     reasons=reasons,
                     base_fixed_s=launches["base"].fixed_s,
                     patched_fixed_s=launches["patched"].fixed_s,
+                    base_first_s=launches["base"].first_s,
+                    patched_first_s=launches["patched"].first_s,
+                    base_warm_s=launches["base"].warm_s,
+                    patched_warm_s=launches["patched"].warm_s,
                 )
             )
         return tuple(out)

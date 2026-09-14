@@ -6,14 +6,18 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from autoresearch.boxes.fake_box import FakeBox, ok
 from autoresearch.boxes.protocol import CommandResult
+from autoresearch.config import load_config
 from autoresearch.referee.referee import PATCHED_TREE
 from autoresearch.types import AttemptRef, Prediction, StopReason, Usage, WorkerOutput
 from autoresearch.worker.protocol import WorkerInput
 
+ROOT = Path(__file__).parent.parent
+TEST_CONFIG = ROOT / "configs" / "t1_w4d.toml"
 BASE_SHA = "c94928ed94899033126c9d47f797a1f698584b20"
 
 DIFF_TEMPLATE = (
@@ -28,6 +32,15 @@ DIFF_TEMPLATE = (
 
 def diff_for(value: str) -> str:
     return DIFF_TEMPLATE.format(value=value)
+
+
+def diff_with(added: tuple[str, ...], path: str = "networkx/algorithms/cluster.py") -> str:
+    """A diff that adds exactly ``added``, for overlap and leader set tests."""
+    body = "\n".join(f"+{line}" for line in added)
+    return (
+        f"diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n"
+        f"@@ -1,2 +1,{2 + len(added)} @@\n context\n{body}\n context\n"
+    )
 
 
 def arg(command: str, flag: str) -> str:
@@ -49,6 +62,10 @@ def referee_box(
     fp_match: bool = True,
     patched_verify_fails: bool = False,
     verify_fails_for: tuple[str, ...] = (),
+    memoized_inputs: tuple[str, ...] = (),
+    overfit_inputs: tuple[str, ...] = (),
+    seed_blind: tuple[str, ...] = (),
+    held_out_wrong: tuple[str, ...] = (),
     contaminate_pairs: bool | int = False,
     cleanup_ok: bool = True,
 ) -> FakeBox:
@@ -60,11 +77,24 @@ def referee_box(
     ``head`` is what the box reports after checking out the base; the referee
     refuses anything but the base sha. ``contaminate_pairs`` as True taints every
     timing sample; as an integer it taints that many timing launches per input
-    (a pass of six pairs is twelve launches) and then lets the rest through,
-    which is how a retry that succeeds is faked.
+    (a pass of six pairs is twelve launches, and the held out instance is timed
+    first) and then lets the rest through, which is how a retry that succeeds is
+    faked.
+
+    Every launch names the instance it builds with ``--seed``. A verify
+    fingerprint carries the seed, so two seeds give two results, except for
+    ``seed_blind`` inputs, which fingerprint the same at every seed. An
+    ``overfit_inputs`` input is ``speedup`` times faster at seed 0 only and
+    unchanged elsewhere: a patch that recognised its input. A ``held_out_wrong``
+    input's patched tree fingerprints differently from the base at any seed
+    but 0: right on the instance it saw, wrong on the one it did not.
     """
     box = box if box is not None else FakeBox()
     timing_launches: dict[str, int] = {}
+    # A verify launch names its input only by its setup text; the test config's
+    # inputs are the ones this box can name. Any other input is nameless here,
+    # so the per input verify behaviours above do not apply to it.
+    setups = {i.name: i.setup for i in load_config(TEST_CONFIG).target.inputs}
 
     box.on("git checkout -q --detach", ok(f"{head}\n"))
 
@@ -96,6 +126,7 @@ def referee_box(
                     "failed": 0 if good else 1,
                     "errors": 0,
                     "duration_s": 1.5,
+                    "tail": "" if good else f"FAILED tests/test_{scope}.py::test_x - assert 0\n",
                 }
             )
         )
@@ -127,14 +158,18 @@ def referee_box(
                     }
                 )
             )
+        seed = int(arg(cmd, "--seed"))
         if "--verify" in cmd:
             # A verify launch carries no label, so an input is identified here
             # by its setup statements, which are the only thing that names it.
             setup = arg(cmd, "--setup")
+            name = next((n for n, s in setups.items() if s == setup), "")
             fails = patched_verify_fails or setup in verify_fails_for
             if patched and fails:
                 return ok(json.dumps({"error": "RecursionError in patched tree"}))
-            fp = "fp_same" if (fp_match or not patched) else "fp_other"
+            wrong = (not fp_match or (name in held_out_wrong and seed != 0)) and patched
+            instance = "" if name in seed_blind else f"_{seed}"
+            fp = ("fp_other" if wrong else "fp_same") + instance
             return ok(
                 json.dumps(
                     {
@@ -152,6 +187,8 @@ def referee_box(
         # only thing in the command that says which input is being timed.
         name = arg(cmd, "--label").split("/")[0]
         ratio = (per_input or {}).get(name, current_speedup())
+        if name in overfit_inputs and seed != 0:
+            ratio = 1.0
         t = 1.0 / ratio if patched else 1.0
         fixed = 0.31 if patched else 0.29
         launch = timing_launches.get(name, 0)
@@ -172,9 +209,20 @@ def referee_box(
                     }
                 )
             )
+        # A memoized input: the patched tree's first call costs what the base's
+        # does, and every call after it returns the cached answer at once.
+        first = 1.0 if (patched and name in memoized_inputs) else t
         return ok(
             json.dumps(
-                {"kind": "run", "min_clean": t, "min_all": t, "samples": [], "fixed_s": fixed}
+                {
+                    "kind": "run",
+                    "min_clean": t,
+                    "min_all": t,
+                    "samples": [],
+                    "fixed_s": fixed,
+                    "first_s": first,
+                    "warm_s": t,
+                }
             )
         )
 

@@ -27,7 +27,10 @@ from autoresearch.intake import derive, scope
 from autoresearch.referee import admissibility
 
 MAX_REPAIRS = 2
-PROPOSE_TURNS = 40
+# The pyparsing proposer of 2026-09-13 spent 40 replies reading core.py and
+# submitted on its 31st once given 80; the cap is a guard against a loop, not a
+# budget, and a conversation this size is cheap next to one attempt of a run.
+PROPOSE_TURNS = 80
 CALIBRATE_ROUNDS = 7
 # The width experiment on networkx, 2026-09-13: about $1.2k of inference over about
 # 775 attempts. Printed as that target's rate, never as this one's.

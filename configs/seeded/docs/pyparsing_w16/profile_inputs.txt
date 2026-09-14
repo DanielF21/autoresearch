@@ -1,0 +1,22 @@
+Cost of grammar.parse_string(text, parse_all=True) on each of the 4 inputs it is timed on,
+at pyparsing efd56db4e59f, the base commit for every attempt.
+
+Absolute times were taken on a referee box and will differ in yours. What
+carries over is the ratio between the inputs and where the time goes.
+'hot self' is the self time spent inside the hot file under cProfile,
+and 'hot share' is its share of all self time. A change with a fixed
+setup cost is free on the slowest input and can be the entire runtime
+of the fastest.
+
+input                 call  hot self hot share  setup
+flat_long          0.0784s   0.1455s     68.8%  import random pp.ParserElement.disable_memoization() rnd = random.Random(SEED) ops = ("+", "-", "*", "/") number = pp.CharsNotIn("+-*/()").set_name("number") muldiv = (pp.Literal("*") | pp.Literal("/")).set_name("muldiv") addsub = (pp.Literal("+") | pp.Literal("-")).set_name("addsub") lpar = pp.Suppress("(") rpar = pp.Suppress(")") expr = pp.Forward().set_name("expr") atom = (number | lpar + expr + rpar).set_name("atom") term = (atom + pp.ZeroOrMore(muldiv + atom)).set_name("term") expr <<= term + pp.ZeroOrMore(addsub + term) grammar = expr num = lambda: str(rnd.randint(100000, 999999)) n_terms = 5000 text = num() + "".join(rnd.choice(ops) + num() for _ in range(n_terms - 1))
+shallow_groups     0.1135s   0.2019s     69.3%  import random pp.ParserElement.disable_memoization() rnd = random.Random(SEED) ops = ("+", "-", "*", "/") number = pp.CharsNotIn("+-*/()").set_name("number") muldiv = (pp.Literal("*") | pp.Literal("/")).set_name("muldiv") addsub = (pp.Literal("+") | pp.Literal("-")).set_name("addsub") lpar = pp.Suppress("(") rpar = pp.Suppress(")") expr = pp.Forward().set_name("expr") atom = (number | lpar + expr + rpar).set_name("atom") term = (atom + pp.ZeroOrMore(muldiv + atom)).set_name("term") expr <<= term + pp.ZeroOrMore(addsub + term) grammar = expr num = lambda: str(rnd.randint(100000, 999999)) groups = [] for _ in range(1500): groups.append("(" + num() + rnd.choice(ops) + num() + ")") text = groups[0] + "".join(rnd.choice(("+", "-")) + g for g in groups[1:])
+balanced_bush      0.1813s   0.2618s     72.3%  import random pp.ParserElement.disable_memoization() rnd = random.Random(SEED) ops = ("+", "-", "*", "/") number = pp.CharsNotIn("+-*/()").set_name("number") muldiv = (pp.Literal("*") | pp.Literal("/")).set_name("muldiv") addsub = (pp.Literal("+") | pp.Literal("-")).set_name("addsub") lpar = pp.Suppress("(") rpar = pp.Suppress(")") expr = pp.Forward().set_name("expr") atom = (number | lpar + expr + rpar).set_name("atom") term = (atom + pp.ZeroOrMore(muldiv + atom)).set_name("term") expr <<= term + pp.ZeroOrMore(addsub + term) grammar = expr num = lambda: str(rnd.randint(100000, 999999)) def tree(depth): if depth == 0: return num() return "(" + tree(depth - 1) + rnd.choice(ops) + tree(depth - 1) + ")" text = tree(11)
+deep_forest        0.2042s   0.2851s     71.4%  import random pp.ParserElement.disable_memoization() rnd = random.Random(SEED) ops = ("+", "-", "*", "/") number = pp.CharsNotIn("+-*/()").set_name("number") muldiv = (pp.Literal("*") | pp.Literal("/")).set_name("muldiv") addsub = (pp.Literal("+") | pp.Literal("-")).set_name("addsub") lpar = pp.Suppress("(") rpar = pp.Suppress(")") expr = pp.Forward().set_name("expr") atom = (number | lpar + expr + rpar).set_name("atom") term = (atom + pp.ZeroOrMore(muldiv + atom)).set_name("term") expr <<= term + pp.ZeroOrMore(addsub + term) grammar = expr num = lambda: str(rnd.randint(100000, 999999)) def deep_expr(depth): out = num() for _ in range(depth): if rnd.random() < 0.5: out = "(" + out + rnd.choice(ops) + num() + ")" else: out = "(" + num() + rnd.choice(ops) + out + ")" return out chains = [deep_expr(60) for _ in range(40)] text = chains[0] + "".join(rnd.choice(("+", "-")) + c for c in chains[1:])
+
+geometric mean of the hot file's share: 70.4%
+
+The call spans 3x between deep_forest and flat_long.
+
+The flat and caller profiles in the other two documents are of the first
+input only.

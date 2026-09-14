@@ -1,0 +1,24 @@
+cProfile of pycodestyle.Checker(lines=SRC_LINES, options=OPTIONS).check_all() with import random NL = chr(10) SQ = chr(39) rng = random.Random(SEED) letters = 'abcdefghijklmnopqrstuvwxyz' long_word = ''.join(rng.choice(letters) for _ in range(80)) lines = ['import os' + NL, 'import sys' + NL, NL] N = 5000 for i in range(N): typ = rng.randrange(6) if typ == 0: lines.append(f'value_{i} = helper_{i}(arg_{i}, {i}){NL}') elif typ == 1: lines.append(f'value_{i}=helper_{i}(arg_{i}, {i}){NL}') elif typ == 2: lines.append(f'value_{i} = helper_{i}(arg_{i}, factor = {i}){NL}') elif typ == 3: lines.append(f'value_{i} = helper_{i}({i},{i}){NL}') elif typ == 4: lines.append(f'value_{i} = helper_{i}(arg_{i}, {i}) {NL}') else: lines.append(f'value_{i} = helper_{i}(arg_{i}, {SQ}{long_word}{i}_{SEED}{SQ}){NL}') lines.append(NL) lines.append(NL) for _ in range(17 + (SEED % 3) + (SEED % 5) + (SEED % 7)): lines.append(f'tail_{SEED}_{_}=1{NL}') OPTIONS = pycodestyle.StyleGuide(quiet=True, select=['E', 'W'], max_line_length=79, max_doc_length=72, indent_size=4).options SRC_LINES = lines
+at pycodestyle d6c38543a95c, the base commit for every attempt.
+         1974513 function calls in 1.303 seconds
+
+   Ordered by: internal time
+   List reduced from 84 to 14 due to restriction <14>
+
+   ncalls  tottime  percall  cumtime  percall filename:lineno(function)
+     5019    0.156    0.000    0.959    0.000 pycodestyle.py:2018(check_logical)
+   150585    0.129    0.000    0.211    0.000 pycodestyle.py:1958(run_check)
+     5019    0.054    0.000    0.077    0.000 pycodestyle.py:1980(build_tokens_line)
+   391521    0.049    0.000    0.049    0.000 {built-in method builtins.getattr}
+    46718    0.047    0.000    0.295    0.000 pycodestyle.py:2065(generate_tokens)
+    46719    0.047    0.000    0.088    0.000 /opt/sail/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/tokenize.py:577(_generate_tokens_from_c_tokenizer)
+     6731    0.040    0.000    0.043    0.000 pycodestyle.py:830(missing_whitespace)
+     5019    0.040    0.000    0.063    0.000 pycodestyle.py:1708(maximum_doc_length)
+        1    0.039    0.039    1.302    1.302 pycodestyle.py:2136(check_all)
+    93428    0.037    0.000    0.037    0.000 pycodestyle.py:1345(_break_around_binary_operators)
+     5019    0.030    0.000    0.036    0.000 pycodestyle.py:806(whitespace_around_operator)
+    46717    0.029    0.000    0.161    0.000 pycodestyle.py:2082(maybe_check_physical)
+     5019    0.029    0.000    0.032    0.000 pycodestyle.py:1436(comparison_to_singleton)
+     5019    0.027    0.000    0.028    0.000 pycodestyle.py:1534(ambiguous_identifier)
+
+

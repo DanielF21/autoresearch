@@ -9,7 +9,7 @@ from autoresearch.config import RunConfig, SuitePaths, load_config
 from autoresearch.referee import admissibility as adm
 from autoresearch.referee.referee import LAUNCH_TIMEOUT, TESTS_TIMEOUT, InputSurvey, Referee, Survey
 from autoresearch.types import SuiteResult
-from tests.helpers import referee_box
+from tests.helpers import arg, referee_box
 
 ROOT = Path(__file__).parent.parent
 
@@ -29,6 +29,9 @@ def _input(name: str, **kw: object) -> InputSurvey:
         fixed_s=0.3,
         python="3.12.4",
         fingerprints=("abc", "abc"),
+        held_out_seed=1234567,
+        held_out_fp="xyz",
+        held_out_call_s=0.6,
     )
     base.update(kw)
     return InputSurvey(name=name, **base)  # type: ignore[arg-type]
@@ -93,22 +96,36 @@ def test_the_call_must_sit_inside_the_band_one_launch_can_time(config: RunConfig
 
 
 def test_the_timing_one_attempt_costs_must_fit_the_budget(config: RunConfig) -> None:
-    # Six pairs of two launches of seven 0.5 s calls after 0.3 s of start: 45.6 s an input.
-    assert adm.timing_per_attempt_s(_good(), 6, 7) == pytest.approx({"a": 45.6, "b": 45.6})
+    # Six pairs of two launches of seven 0.5 s calls after 0.3 s of start: 45.6 s an
+    # input per instance, and the referee times two instances of each.
+    assert adm.INSTANCES_PER_INPUT == 2
+    assert adm.timing_per_attempt_s(_good(), 6, 7) == pytest.approx({"a": 91.2, "b": 91.2})
     verdicts = adm.judge(config.target, _good(), 7, 6)
     assert _levels(verdicts)["referee time per attempt"] == "pass"
-    slow = replace(_good(), inputs=(_input("a"), _input("slow", call_s=20.0)))
+    slow = replace(_good(), inputs=(_input("a"), _input("slow", call_s=10.0)))
     verdicts = adm.judge(config.target, slow, 7, 6)
     assert _levels(verdicts)["referee time per attempt"] == "fail"
     detail = next(v.detail for v in verdicts if v.rule == "referee time per attempt")
-    assert detail.index("slow") < detail.index("a 46s") and "smaller or drop them" in detail
+    assert detail.index("slow") < detail.index("a 91s") and "smaller or drop them" in detail
+    assert "2 instances" in detail
     broken = replace(_good(), inputs=(InputSurvey("b", error="ImportError: x"),))
     assert "referee time per attempt" not in _levels(adm.judge(config.target, broken, 7, 6))
 
 
 def test_both_suites_must_pass_and_fit_the_timeout(config: RunConfig) -> None:
-    failing = replace(_good(), tests=(_suite("module"), _suite("full", ok=False)))
-    assert _levels(adm.judge(config.target, failing, 7, 6))["full suite"] == "fail"
+    broken = replace(
+        _suite("full", ok=False),
+        failures="...\nFAILED tests/test_unit.py::test_dates - AssertionError\n1 failed, 2135 passed\n",
+    )
+    failing = replace(_good(), tests=(_suite("module"), broken))
+    verdicts = adm.judge(config.target, failing, 7, 6)
+    assert _levels(verdicts)["full suite"] == "fail"
+    # The failing test is named, so a check that fails on the base tree says what to look at.
+    assert "tests/test_unit.py::test_dates" in next(v.detail for v in verdicts if v.failed)
+    nameless = replace(_good(), tests=(_suite("module"), _suite("full", ok=False)))
+    assert "named no test" in next(
+        v.detail for v in adm.judge(config.target, nameless, 7, 6) if v.failed
+    )
     slow = replace(_good(), tests=(_suite("module"), _suite("full", duration_s=TESTS_TIMEOUT)))
     assert _levels(adm.judge(config.target, slow, 7, 6))["full suite"] == "fail"
     missing = replace(_good(), tests=(_suite("module"),), errors=("full tests: guest died",))
@@ -130,6 +147,29 @@ def test_one_suite_named_twice_warns_and_uncalibrated_inputs_are_noted(
     assert not any(v.failed for v in verdicts)
 
 
+def test_the_seed_must_change_the_result_and_keep_the_size_class(config: RunConfig) -> None:
+    """pycodestyle_p3_w16 attempt 0233: five of six inputs returned the integer 0
+    whatever their text, and a patch carried that answer. The held out instance
+    has to compute something else, at a cost the calibrated floor still covers."""
+    verdicts = adm.judge(config.target, _good(), 7, 6)
+    assert _levels(verdicts)["a seed matters"] == "pass"
+    assert "1234567" in next(v.detail for v in verdicts if v.rule == "a seed matters")
+    blind = replace(_good(), inputs=(_input("a", held_out_fp="abc"),))
+    verdicts = adm.judge(config.target, blind, 7, 6)
+    assert _levels(verdicts)["a seed matters"] == "fail"
+    detail = next(v.detail for v in verdicts if v.rule == "a seed matters")
+    assert "fingerprint the same" in detail and "read SEED" in detail
+    for held in (0.5 * adm.SIZE_CLASS_FACTOR + 0.1, 0.5 / adm.SIZE_CLASS_FACTOR - 0.01):
+        other_size = replace(_good(), inputs=(_input("a", held_out_call_s=held),))
+        verdicts = adm.judge(config.target, other_size, 7, 6)
+        assert _levels(verdicts)["a seed matters"] == "fail"
+        assert "size class" in next(v.detail for v in verdicts if v.rule == "a seed matters")
+    edge = replace(_good(), inputs=(_input("a", held_out_call_s=0.5 * adm.SIZE_CLASS_FACTOR),))
+    assert _levels(adm.judge(config.target, edge, 7, 6))["a seed matters"] == "pass"
+    broken = replace(_good(), inputs=(InputSurvey("a", error="ImportError: x"),))
+    assert "a seed matters" not in _levels(adm.judge(config.target, broken, 7, 6))
+
+
 def test_render_names_every_failed_rule_and_the_verdict(config: RunConfig) -> None:
     survey = replace(_good(), inputs=(_input("a", hot_executed=False),))
     verdicts = adm.judge(config.target, survey, 7, 6)
@@ -138,26 +178,39 @@ def test_render_names_every_failed_rule_and_the_verdict(config: RunConfig) -> No
     assert text.splitlines()[-1].startswith("not admissible: 1 rule(s) failed")
     assert "python 3.12.4 in the box" in text
     assert "module suite: ok" in text
+    assert "xyz (seed 1234567, 0.6000s)" in text
 
 
-def test_the_referee_surveys_the_base_tree_twice_per_input_and_both_suites(
+def test_the_referee_surveys_the_base_tree_three_times_per_input_and_both_suites(
     config: RunConfig,
 ) -> None:
-    """No patch, no floors needed, and the worktree is cleaned up after."""
+    """Twice at seed 0 for determinism, once at a held out seed for whether the
+    seed matters. No patch, no floors needed, and the worktree is cleaned up after."""
     first, *rest = config.target.inputs
     bare = replace(
         config, target=replace(config.target, inputs=(replace(first, noise_floor=None), *rest))
     )
     box = referee_box()
-    ref = Referee(box, bare)
+    ref = Referee(box, bare, draw_seed=lambda: 4242)
     ref.setup()
     survey = ref.survey()
     n = len(config.target.inputs)
     verifies = [c for c in box.commands if "--verify" in c]
-    assert len(verifies) == 2 * n and all("/base " in c or c.endswith("/base") for c in verifies)
+    assert len(verifies) == 3 * n and all("/base " in c or c.endswith("/base") for c in verifies)
+    seeds = [arg(c, "--seed") for c in verifies]
+    assert seeds == ["0", "0", "4242"] * n
     assert not any("--patch" in c or "--repeats" in c or "canary.py" in c for c in box.commands)
     assert [i.name for i in survey.inputs] == [i.name for i in config.target.inputs]
     assert all(i.deterministic and i.hot_executed and i.python == "3.12.4" for i in survey.inputs)
+    assert all(i.seed_matters and i.held_out_seed == 4242 for i in survey.inputs)
+    assert all(
+        i.held_out_fp == "fp_same_4242" and i.fingerprints[0] == "fp_same_0" for i in survey.inputs
+    )
     assert [t.scope for t in survey.tests] == ["module", "full"]
     assert sum(1 for c in box.commands if "--remove" in c) == 2
     assert ref.broken == ""
+    blind = referee_box(seed_blind=(first.name,))
+    ref = Referee(blind, bare, draw_seed=lambda: 4242)
+    ref.setup()
+    survey = ref.survey()
+    assert not survey.inputs[0].seed_matters and survey.inputs[1].seed_matters

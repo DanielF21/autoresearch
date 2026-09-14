@@ -8,7 +8,7 @@ import pytest
 from autoresearch.boxes.fake_box import FakeBox, FakeBoxFactory, fail, ok
 from autoresearch.boxes.image import BASE_DIR, HISTORY_DIR, REPO_DIR
 from autoresearch.config import RunConfig, load_config
-from autoresearch.model.fake_model import FakeChatModel, Scripted, text, tool_call
+from autoresearch.model.fake_model import FakeChatModel, Scripted, malformed_call, text, tool_call
 from autoresearch.model.protocol import ModelError
 from autoresearch.types import Attempt as HistoryAttempt
 from autoresearch.types import (
@@ -118,7 +118,7 @@ def test_happy_path_submits_a_diff(config: RunConfig) -> None:
     assert "attempt 0001" in first[1]["content"]
     # The target is described from the config: package, alias, and each input's setup.
     assert "Package: `networkx`" in first[1]["content"] and "bound to `nx`" in first[1]["content"]
-    assert "G = nx.gn_graph(800, seed=3)" in first[1]["content"]
+    assert "G = nx.gn_graph(800, seed=3 + SEED)" in first[1]["content"]
     assert "graph\n" not in first[1]["content"]
     last = model.requests[-1]
     assert last[2]["role"] == "assistant" and last[2].get("reasoning_content") == "thinking"
@@ -229,6 +229,74 @@ def test_the_system_message_is_the_slots_prompt_version(config: RunConfig) -> No
     assert "Your job in particular is to depart" in system and "Python 3.12.4" in system
 
 
+def test_v0_gets_the_width_experiment_prompt_and_its_closing(config: RunConfig) -> None:
+    from dataclasses import replace
+
+    factory = FakeBoxFactory(prepare=prepare)
+    model = FakeChatModel(script=submit_script())
+    inp = replace(make_input(config), prompt="v0")
+    out = AgentLoopWorker(model, factory, config).attempt(inp)
+    assert out.stop_reason == StopReason.SUBMITTED
+    system = model.requests[0][0]["content"]
+    assert system.startswith("You are a performance engineer working alone")
+    first = model.requests[0][1]["content"]
+    assert first.endswith("then make one change and submit.")
+
+
+def test_hidden_numbers_are_announced_in_the_first_message(config: RunConfig) -> None:
+    from dataclasses import replace
+
+    factory = FakeBoxFactory(prepare=prepare)
+    model = FakeChatModel(script=submit_script())
+    inp = replace(make_input(config), hidden_numbers=(5, 6))
+    AgentLoopWorker(model, factory, config).attempt(inp)
+    first = model.requests[0][1]["content"]
+    assert "2 attempts from the record are withheld from you this round" in first
+    plain = FakeChatModel(script=submit_script())
+    AgentLoopWorker(plain, FakeBoxFactory(prepare=prepare), config).attempt(make_input(config))
+    assert "withheld" not in plain.requests[0][1]["content"]
+
+
+def test_without_the_index_the_first_message_has_no_table(config: RunConfig) -> None:
+    from dataclasses import replace
+
+    cfg = replace(config, worker=replace(config.worker, history_index=False))
+    earlier = HistoryAttempt(
+        ref=AttemptRef(1, 1, 0),
+        base_sha=BASE_SHA,
+        patch=DIFF,
+        prediction=Prediction(1.5),
+        rationale="tried caching",
+        stop_reason=StopReason.SUBMITTED,
+        usage=Usage(),
+        wall_s=10.0,
+        measurement=Measurement(
+            applied=True,
+            tests=(
+                SuiteResult("module", 5, 0, 0, 1, True),
+                SuiteResult("full", 9, 1, 0, 60, False),
+            ),
+            inputs=(InputTiming("er1000_005", 1.0106, "a", "a", speedup=1.002),),
+        ),
+    )
+    boxes: list[FakeBox] = []
+
+    def prep(box: FakeBox, role: str) -> None:
+        prepare(box, role)
+        boxes.append(box)
+
+    model = FakeChatModel(script=submit_script())
+    AgentLoopWorker(model, FakeBoxFactory(prepare=prep), cfg).attempt(make_input(cfg, (earlier,)))
+    system = model.requests[0][0]["content"]
+    first = model.requests[0][1]["content"]
+    assert "there is no index" in system and "history table" not in system
+    assert "1 earlier attempt" in first and "measurement.json holds the geomean" in first
+    assert "0001     1.00x" not in first and "tests failed" not in first
+    assert "tried caching" not in first
+    # The directory is still staged in full: it is the record now.
+    assert f"{HISTORY_DIR}/0001/patch.diff" in boxes[0].files
+
+
 def test_a_submit_on_the_last_turn_is_recorded_as_last_turn(config: RunConfig) -> None:
     from dataclasses import replace
 
@@ -283,10 +351,22 @@ def test_max_input_tokens_cap(config: RunConfig) -> None:
 
 def test_repeated_identical_tool_call_ends_the_attempt(config: RunConfig) -> None:
     factory = FakeBoxFactory(prepare=prepare)
-    model = FakeChatModel(script=[tool_call("shell", {"cmd": "cat -n same"}) for _ in range(5)])
+    model = FakeChatModel(script=[tool_call("shell", {"cmd": "cat -n same"}) for _ in range(12)])
     out = AgentLoopWorker(model, factory, config).attempt(make_input(config))
     assert out.stop_reason == StopReason.REPEATED_TOOL_CALL
-    assert out.turns == 3
+    assert out.turns == 10
+
+
+def test_nine_repeats_of_a_benchmark_do_not_end_the_attempt(config: RunConfig) -> None:
+    # run_benchmark has no arguments, so every call looks identical; re timing to
+    # average out noise must not read as a loop.
+    factory = FakeBoxFactory(prepare=prepare)
+    script: list[Scripted] = [tool_call("shell", {"cmd": "cat -n same"}) for _ in range(9)]
+    script.append(tool_call("submit", {"rationale": "done", "predicted_speedup": 1.5}))
+    model = FakeChatModel(script=script)
+    out = AgentLoopWorker(model, factory, config).attempt(make_input(config))
+    assert out.stop_reason == StopReason.SUBMITTED
+    assert out.turns == 10
 
 
 def test_no_tool_call_is_nudged_once_then_ends(config: RunConfig) -> None:
@@ -297,6 +377,18 @@ def test_no_tool_call_is_nudged_once_then_ends(config: RunConfig) -> None:
     assert out.turns == 2
     nudges = [m for m in model.requests[1] if m["role"] == "user"]
     assert len(nudges) == 2 and "without calling a tool" in nudges[-1]["content"]
+
+
+def test_a_cut_off_tool_call_is_refused_and_the_attempt_goes_on(config: RunConfig) -> None:
+    factory = FakeBoxFactory(prepare=prepare)
+    model = FakeChatModel(script=[malformed_call("shell", '{"cmd": "cat -n x'), *submit_script()])
+    out = AgentLoopWorker(model, factory, config).attempt(make_input(config))
+    assert out.stop_reason == StopReason.SUBMITTED and out.turns == 5
+    reply = next(m for m in model.requests[1] if m["role"] == "tool")
+    assert reply["content"].startswith("error:") and "not valid JSON" in reply["content"]
+    echoed = next(m for m in model.requests[1] if m["role"] == "assistant")
+    assert echoed["tool_calls"][0]["function"]["arguments"] == "{}"
+    assert not any("cat -n x'" in c for c in factory.created[0].commands)
 
 
 def test_model_error_after_retry_ends_the_attempt(config: RunConfig) -> None:

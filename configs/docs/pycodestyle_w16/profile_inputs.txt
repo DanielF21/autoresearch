@@ -1,0 +1,24 @@
+Cost of style.input_file('bench.py', lines=source) on each of the 6 inputs it is timed on,
+at pycodestyle d6c38543a95c, the base commit for every attempt.
+
+Absolute times were taken on a referee box and will differ in yours. What
+carries over is the ratio between the inputs and where the time goes.
+'hot self' is the self time spent inside the hot file under cProfile,
+and 'hot share' is its share of all self time. A change with a fixed
+setup cost is free on the slowest input and can be the entire runtime
+of the fastest.
+
+input                 call  hot self hot share  setup
+many_functions     0.3565s   0.6373s     75.7%  pycodestyle.USER_CONFIG = None pycodestyle.PROJECT_CONFIG = () style = pycodestyle.StyleGuide(reporter=pycodestyle.BaseReport, paths=[]) rows = [] for i in range(2000): rows.extend(['def function_%d(value):' % i, ' return value + %d' % i]) if i + 1 < 2000: rows.extend(['', '']) source = [row + chr(10) for row in rows]
+many_assignments   0.8671s   1.5112s     74.0%  pycodestyle.USER_CONFIG = None pycodestyle.PROJECT_CONFIG = () style = pycodestyle.StyleGuide(reporter=pycodestyle.BaseReport, paths=[]) rows = [] for i in range(8000): rows.append('v_%d = a_%d + b_%d * c_%d - d_%d / e_%d ** f_%d' % (i, i, i, i, i, i, i)) source = [row + chr(10) for row in rows]
+dense_continuations   0.2464s   0.4154s     74.0%  pycodestyle.USER_CONFIG = None pycodestyle.PROJECT_CONFIG = () style = pycodestyle.StyleGuide(reporter=pycodestyle.BaseReport, paths=[]) rows = [] for i in range(500): rows.append('def wrap_%d(data):' % i) rows.append(' result = compute_%d(' % i) for j in range(10): rows.append(' argument_%d_%d,' % (i, j)) rows.append(' )') rows.append(' return result') if i + 1 < 500: rows.extend(['', '']) source = [row + chr(10) for row in rows]
+inline_comments    0.4695s   0.9921s     76.9%  pycodestyle.USER_CONFIG = None pycodestyle.PROJECT_CONFIG = () style = pycodestyle.StyleGuide(reporter=pycodestyle.BaseReport, paths=[]) rows = [] for i in range(8000): rows.append('value_%d = %d # Store item %d' % (i, i, i)) source = [row + chr(10) for row in rows]
+invalid_escape_strings   0.4702s   1.0050s     77.1%  pycodestyle.USER_CONFIG = None pycodestyle.PROJECT_CONFIG = () style = pycodestyle.StyleGuide(reporter=pycodestyle.BaseReport, paths=[]) rows = [] for i in range(8000): rows.append(('pattern_%d = ' + chr(39) + chr(92) + 'd+' + chr(39)) % i) source = [row + chr(10) for row in rows]
+multiline_docstrings   0.2619s   0.4560s     75.8%  pycodestyle.USER_CONFIG = None pycodestyle.PROJECT_CONFIG = () style = pycodestyle.StyleGuide(reporter=pycodestyle.BaseReport, paths=[]) rows = [] for i in range(900): rows.append('def document_%d(value):' % i) rows.append((' ' + chr(34) * 3 + 'Docstring for function %d.') % i) rows.append('') rows.append(' The quick brown fox jumps over the lazy dog.') rows.append(' It should be styled with spaces and punctuation.') rows.append(' ' + chr(34) * 3) rows.append(' return value * %d' % i) if i + 1 < 900: rows.extend(['', '']) source = [row + chr(10) for row in rows]
+
+geometric mean of the hot file's share: 75.6%
+
+The call spans 4x between many_assignments and dense_continuations.
+
+The flat and caller profiles in the other two documents are of the first
+input only.

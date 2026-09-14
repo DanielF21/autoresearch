@@ -75,6 +75,18 @@ def test_parse_response_bad_json_arguments_become_empty_dict() -> None:
     }
     r = parse_response(raw, 0.0)
     assert r.tool_calls[0].arguments == {} and r.tool_calls[0].raw_arguments == "{oops"
+    assert r.tool_calls[0].malformed
+    # The echo carries "{}" in place of the cut off text: the endpoint refuses a
+    # request whose history holds a tool call with invalid JSON arguments, which
+    # would end the conversation at every later turn.
+    echoed = r.message["tool_calls"][0]["function"]
+    assert echoed == {"name": "shell", "arguments": "{}"}
+    assert (
+        "{oops" in r.tool_calls[0].malformed_reply
+        and "did not run" in r.tool_calls[0].malformed_reply
+    )
+    good = parse_response(RAW, 0.0)
+    assert not good.tool_calls[0].malformed
 
 
 def test_parse_response_without_choices_raises() -> None:

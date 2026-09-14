@@ -22,7 +22,7 @@ from autoresearch.orchestrator.pool import RefereePool
 from autoresearch.orchestrator.round import NO_PATCH, run_round
 from autoresearch.types import AttemptRef, StopReason, WorkerOutput
 from autoresearch.worker.protocol import WorkerInput
-from tests.helpers import BASE_SHA, FakeWorker, diff_for, referee_box, submitted
+from tests.helpers import BASE_SHA, FakeWorker, diff_for, diff_with, referee_box, submitted
 
 ROOT = Path(__file__).parent.parent
 
@@ -131,6 +131,39 @@ def test_prompt_versions_go_by_worker_slot_and_are_recorded(tmp_path: Path) -> N
         for i in inputs
     ]
     assert recorded == ["v1", "v2", "v1"]
+
+
+def test_hidden_slots_do_not_see_the_leader_set(tmp_path: Path) -> None:
+    speedups = {"a = 1": 1.05, "b = 2\n+c = 3": 1.10, "b = 2\n+d = 4": 1.06}
+    cfg, paths, pool, _ = start(tmp_path, 3, speedups)
+    # Round 1: three visible workers, all of them seeing nothing.
+    worker = FakeWorker(
+        [
+            submitted(diff_with(("a = 1",))),
+            submitted(diff_with(("b = 2", "c = 3"))),
+            submitted(diff_with(("b = 2", "d = 4"))),
+        ]
+    )
+    run_round(1, cfg, paths, worker, pool)
+    assert [i.hidden_numbers for i in worker.inputs] == [(), (), ()]
+
+    # Round 2 with the top two slots hidden: attempt 2 is the best and attempt 3
+    # overlaps it by half, so those two are withheld; attempt 1 is not.
+    cfg = replace(cfg, width=4, worker=replace(cfg.worker, hidden_slots=2))
+    pool2 = RefereePool(cfg, paths, make_factory(speedups))
+    pool2.start()
+    worker = FakeWorker([submitted(None)])
+    outcome = run_round(2, cfg, paths, worker, pool2)
+    inputs = sorted(worker.inputs, key=lambda i: i.ref.worker)
+    assert [[a.ref.number for a in i.history] for i in inputs] == [[1, 2, 3], [1, 2, 3], [1], [1]]
+    assert [i.hidden_numbers for i in inputs] == [(), (), (2, 3), (2, 3)]
+    assert [i.cache_key.endswith("-hidden") for i in inputs] == [False, False, True, True]
+    seen = [json.loads((paths.attempt(i.ref) / history.INPUT_JSON).read_text()) for i in inputs]
+    assert seen[0]["history_numbers"] == [1, 2, 3] and seen[0]["hidden_numbers"] == []
+    assert seen[2]["history_numbers"] == [1] and seen[2]["hidden_numbers"] == [2, 3]
+    # The record is over the whole past, whoever was shown it.
+    assert outcome.record.best_ratio_so_far == pytest.approx(1.10)
+    pool2.terminate_all()
 
 
 def test_width_two_records_both_and_best_is_the_maximum(tmp_path: Path) -> None:
