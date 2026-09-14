@@ -1,17 +1,12 @@
-# Target 1, width 1: the width experiment, launched 2026-09-12 on the control box.
-#
-# Identical to t1_w4d.toml as it stood on 2026-09-12 except run_id, width and
-# rounds; the worker caps here (80 turns, 3600 s, 8M tokens) are a third of what
-# t1_w4d.toml carries since 2026-09-13. Four of these run at
-# once, widths 1, 4, 16 and 64, 16 rounds each, so the only thing that differs
-# between them is how many workers see the same history each round.
-#
-# Every number is either a user decision or a measurement, noted inline.
+# Sail Voyages smoke run: the networkx target of t1_w4d.toml at width 1 for one
+# round, launched 2026-09-14 to see one attempt appear as a Voyage before the
+# overfitting reruns. Everything below [run] is t1_w4d.toml unchanged: the same
+# harness calibrated inputs and floors, the same worker caps.
 
 [run]
-run_id = "t1_wx1"
+run_id = "nx_voyage_w1"
 width = 1
-rounds = 16
+rounds = 1
 
 [target]
 name = "networkx_clustering_er1000_005"
@@ -44,8 +39,12 @@ full = "networkx"             # the suite lives inside the package directory
 # first of these taught four of seven winning patches to be up to 4x slower than
 # stock on sparse graphs. artifacts/generality.md has the measurements.
 #
-# setup runs once per launch with nx bound; call is evaluated in the same
-# namespace. noise_floor is per input because it is a property of how long the
+# setup runs once per launch with nx, ROOT and SEED bound; call is evaluated in
+# the same namespace. SEED picks the instance: the worker is shown seed 0, the
+# referee also times a seed it never sees, so every generator offsets its seed
+# by it. The floors below predate that and the walk over the result inside the
+# timed region, so this file is the test fixture and the intake template only;
+# recalibrate before any run on it. noise_floor is per input because it is a property of how long the
 # call takes, not of the patch. Measured on a referee box, 42 base against base
 # pairs each, the referee's own pairing plan: standard deviation of the null
 # ratio runs 0.0079 at a 1.5s call and 0.0214 at a 4ms one. A regression is a
@@ -55,7 +54,7 @@ full = "networkx"             # the suite lives inside the package directory
 
 [[target.inputs]]
 name = "er1000_005"
-setup = "G = nx.erdos_renyi_graph(1000, 0.05, seed=42, directed=True)"
+setup = "G = nx.erdos_renyi_graph(1000, 0.05, seed=42 + SEED, directed=True)"
 noise_floor = 1.0106          # measurement C, 48 pairs; checked by tests/test_thresholds.py.
                               # Kept over the 1.0082 this box's 42 pairs gave, so the column
                               # stays comparable with t1_w4 and t1_w4b, and it is the stricter
@@ -63,24 +62,24 @@ noise_floor = 1.0106          # measurement C, 48 pairs; checked by tests/test_t
 
 [[target.inputs]]
 name = "er1000_001"
-setup = "G = nx.erdos_renyi_graph(1000, 0.01, seed=42, directed=True)"
+setup = "G = nx.erdos_renyi_graph(1000, 0.01, seed=42 + SEED, directed=True)"
 noise_floor = 1.0151          # calibrated, 42 clean pairs, null sd 0.0106
 
 [[target.inputs]]
 name = "er1000_0002"
-setup = "G = nx.erdos_renyi_graph(1000, 0.002, seed=42, directed=True)"
+setup = "G = nx.erdos_renyi_graph(1000, 0.002, seed=42 + SEED, directed=True)"
 noise_floor = 1.0280          # calibrated, 42 clean pairs, null sd 0.0194. The loosest floor
                               # of the five: a 9ms call, so only a gross regression here is
                               # distinguishable from noise.
 
 [[target.inputs]]
 name = "gn800"
-setup = "G = nx.gn_graph(800, seed=3)"
+setup = "G = nx.gn_graph(800, seed=3 + SEED)"
 noise_floor = 1.0218          # calibrated, 42 clean pairs, null sd 0.0214
 
 [[target.inputs]]
 name = "er1600_002"
-setup = "G = nx.erdos_renyi_graph(1600, 0.02, seed=42, directed=True)"
+setup = "G = nx.erdos_renyi_graph(1600, 0.02, seed=42 + SEED, directed=True)"
 noise_floor = 1.0193          # calibrated, 40 clean of 42 pairs, null sd 0.0569. The two the
                               # steal guard dropped, and two clean pairs at 0.73x and 1.20x,
                               # make this the only input with a tail the guard misses. The
@@ -90,9 +89,11 @@ noise_floor = 1.0193          # calibrated, 40 clean of 42 pairs, null sd 0.0569
 model = "deepseek/deepseek-v4-pro-0813"
 reasoning_effort = "high"
 completion_window = "asap"
-max_turns = 80
-max_seconds = 3600
-max_input_tokens = 8000000
+max_turns = 240            # user decision 2026-09-13: 3x the width control's 80. The turn cap
+max_seconds = 10800        # bound on the winners there (27 percent record rate at cap against
+max_input_tokens = 24000000  # 11 percent on early submits at width 16); the run pays for the
+                           # attempts it cuts short. This file is the intake template, so every
+                           # config it writes carries these caps.
 turn_timeout = 600            # Sail's default per request
 
 [referee]
@@ -104,7 +105,7 @@ hash_seeds = [0, 1, 2, 3, 4]
 [boxes]
 worker_size = "m"
 referee_size = "m"
-control_size = "m"           # four orchestrators share it; size s is 1 cpu and 1 GB
+control_size = "s"
 disk_gib = 32
 
 [storage]

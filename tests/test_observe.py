@@ -4,11 +4,11 @@ Two halves: the worker emits at the right moments on every exit path, and a
 tracer that fails changes nothing about what the attempt produces.
 """
 
-import json
 import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -16,7 +16,8 @@ from autoresearch import observe
 from autoresearch.boxes.fake_box import FakeBox, FakeBoxFactory, fail, ok
 from autoresearch.config import ConfigError, ObserveConfig, RunConfig, load_config, parse_config
 from autoresearch.model.fake_model import FakeChatModel, Scripted, text, tool_call
-from autoresearch.types import AttemptRef, StopReason, WorkerOutput
+from autoresearch.model.protocol import ModelResponse, ToolCall
+from autoresearch.types import AttemptRef, StopReason, Usage, WorkerOutput
 from autoresearch.worker.agent_loop import AgentLoopWorker
 from autoresearch.worker.protocol import WorkerInput
 from tests.helpers import BASE_SHA, FakeTracer
@@ -155,6 +156,13 @@ def test_tracing_off_without_keys(config: RunConfig, monkeypatch: pytest.MonkeyP
     assert isinstance(observe.build_tracer(config), observe.NullTracer)
 
 
+def test_tracing_on_with_the_sail_key(config: RunConfig, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SAIL_API_KEY", "sk_test")
+    tracer = observe.build_tracer(config)
+    assert isinstance(tracer, observe.VoyageTracer)
+    assert tracer._series == config.run_id
+
+
 def test_session_id_groups_a_setting() -> None:
     assert observe.session_id(ObserveConfig(True), "t1_w1") == "t1_w1"
     assert observe.session_id(ObserveConfig(True, "pilot"), "t1_w1") == "pilot-t1_w1"
@@ -167,24 +175,138 @@ def test_null_tracer_accepts_every_call() -> None:
     trace.end(StopReason.SUBMITTED, patch=DIFF)
 
 
-def test_the_langfuse_attempt_maps_turns_and_tools_to_observations() -> None:
-    """Against a stand in for the SDK, so the shape is pinned without a network."""
-    client = _FakeClient()
-    root = client.start_observation(name="attempt 0007", as_type="span", input={})
-    trace = observe.LangfuseAttempt(_client=client, _root=root, _model="deepseek/v4")
+# ----- Sail Voyages, against a stand in for the SDK so no network is used ---------------
+
+
+REF = AttemptRef(number=7, round=2, worker=1)
+
+
+def response() -> ModelResponse:
+    return ModelResponse(
+        content="looking",
+        reasoning="thinking",
+        tool_calls=(ToolCall("c1", "shell", {"cmd": "cat a"}),),
+        usage=Usage(1000, 600, 100, 40),
+        finish_reason="tool_calls",
+        latency_s=1.23456,
+    )
+
+
+def start(sdk: "_FakeSdk") -> observe.VoyageAttempt:
+    tracer = observe.VoyageTracer(_sdk=sdk, _series="t1_w1", _model="deepseek/v4")
+    trace = tracer.attempt(REF, "t1_w1", BASE_SHA)
+    assert isinstance(trace, observe.VoyageAttempt)
+    return trace
+
+
+def test_the_voyage_attempt_records_events_and_completes() -> None:
+    sdk = _FakeSdk()
+    trace = start(sdk)
+    messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}]
 
     trace.box("sb_1")
-    trace.tool(1, "shell", {"cmd": "cat a"}, "contents")
+    trace.model_turn(1, messages, response())
+    trace.tool(1, "shell", {"cmd": "cat a"}, "x" * 10_000)
     trace.end(StopReason.SUBMITTED, patch=DIFF)
 
-    assert [(c.name, c.as_type) for c in root.children] == [("shell", "tool")]
-    assert root.children[0].output == "contents"
-    assert root.ended and client.flushed == 1
-    assert json.loads(json.dumps(root.output))["stop_reason"] == "submitted"
+    voyage = sdk.only
+    assert voyage.name == "t1_w1"
+    assert voyage.metadata["attempt"] == REF.dirname and voyage.metadata["model"] == "deepseek/v4"
+    assert [k for k, _ in voyage.events] == ["box.ready", "model.turn", "tool.result"]
+    turn = voyage.events[1][1]
+    assert turn["new_messages"] == 2 and turn["latency_s"] == 1.235
+    assert turn["input_tokens"] == response().usage.prompt_tokens
+    assert turn["tool_calls"] == [{"name": "shell", "arguments": '{"cmd": "cat a"}'}]
+    tool = voyage.events[2][1]
+    assert tool["result_chars"] == 10_000 and len(tool["result"]) < 4100
+    assert voyage.agent_log == [("enter", "Worker", "worker"), ("exit",)]
+    assert voyage.terminal == [("complete", "submitted", voyage.terminal[0][2])]
+    assert voyage.terminal[0][2]["stop_reason"] == "submitted"
+    assert voyage.terminal[0][2]["patch_bytes"] == len(DIFF)
     assert trace.failures == ()
 
 
-def test_a_flush_that_hangs_does_not_hold_up_the_attempt(
+def test_the_fallback_voyage_is_disabled_as_soon_as_it_is_created() -> None:
+    """Otherwise every thread without its own Voyage, the referee's included,
+    would attach its box commands and model calls to this attempt. The worker's
+    own thread is disabled first, so its model calls never resolve the fallback
+    while another attempt is between its create and its disable."""
+    sdk = _FakeSdk()
+    start(sdk)
+    assert sdk.calls == ["disable", "create", "disable"]
+    assert sdk.disabled_on[0] == threading.get_ident()
+    assert sdk.disabled_on[1] != threading.get_ident()
+
+
+def test_a_create_that_finishes_after_the_bound_gave_up_is_failed_not_left_running() -> None:
+    released = threading.Event()
+    sdk = _FakeSdk(create_hook=lambda: released.wait(30))
+    tracer = observe.VoyageTracer(_sdk=sdk, _series="t1_w1", _model="m")
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(observe, "FLUSH_TIMEOUT_S", 0.2)
+        trace = tracer.attempt(REF, "t1_w1", BASE_SHA)
+    assert isinstance(trace, observe.NullAttempt)
+    released.set()
+    deadline = time.perf_counter() + 5.0
+    while time.perf_counter() < deadline and not (sdk.voyages and sdk.voyages[0].terminal):
+        time.sleep(0.01)
+    assert sdk.only.terminal[0][:2] == ("fail", "tracing_abandoned")
+    assert sdk.calls[-1] == "disable"
+
+
+def test_the_sdk_auto_spans_are_switched_off(
+    config: RunConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SAIL_API_KEY", "sk_test")
+    monkeypatch.delenv("SAIL_VOYAGE_AUTO_SPANS", raising=False)
+    observe.build_tracer(config)
+    import os
+
+    assert os.environ["SAIL_VOYAGE_AUTO_SPANS"] == "0"
+
+
+def test_turns_count_only_the_messages_added_since_the_last() -> None:
+    sdk = _FakeSdk()
+    trace = start(sdk)
+    trace.model_turn(1, [{}, {}], response())
+    trace.model_turn(2, [{}, {}, {}, {}], response())
+    assert [p["new_messages"] for _, p in sdk.only.events] == [2, 2]
+
+
+def test_an_attempt_that_ends_in_error_fails_the_voyage() -> None:
+    sdk = _FakeSdk()
+    trace = start(sdk)
+    trace.end(StopReason.MODEL_ERROR, error="upstream 503")
+    kind, error_type, message, payload = sdk.only.terminal[0]
+    assert (kind, error_type, message) == ("fail", "model_error", "upstream 503")
+    assert payload["error"] == "upstream 503"
+
+
+def test_a_create_that_fails_traces_nothing(capsys: pytest.CaptureFixture[str]) -> None:
+    sdk = _FakeSdk(create_raises=True)
+    tracer = observe.VoyageTracer(_sdk=sdk, _series="t1_w1", _model="m")
+    assert isinstance(tracer.attempt(REF, "t1_w1", BASE_SHA), observe.NullAttempt)
+    assert "tracing: start" in capsys.readouterr().out
+
+
+def test_a_create_that_hangs_does_not_hold_up_the_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(observe, "FLUSH_TIMEOUT_S", 0.2)
+    released = threading.Event()
+    sdk = _FakeSdk(create_hook=lambda: released.wait(30))
+    tracer = observe.VoyageTracer(_sdk=sdk, _series="t1_w1", _model="m")
+
+    t0 = time.perf_counter()
+    trace = tracer.attempt(REF, "t1_w1", BASE_SHA)
+    waited = time.perf_counter() - t0
+    released.set()  # let the daemon thread go before the test ends
+
+    assert waited < 5.0, f"attempt() blocked for {waited:.1f}s on a hanging create"
+    assert isinstance(trace, observe.NullAttempt)
+
+
+def test_a_terminal_flush_that_hangs_does_not_hold_up_the_attempt(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The t1_w4b regression: a slow flush raises nothing, so try/except missed it.
@@ -194,90 +316,109 @@ def test_a_flush_that_hangs_does_not_hold_up_the_attempt(
     """
     monkeypatch.setattr(observe, "FLUSH_TIMEOUT_S", 0.2)
     released = threading.Event()
-    client = _FakeClient()
-
-    def hang() -> None:
-        released.wait(30)
-
-    client.flush = hang  # type: ignore[method-assign]
-    root = client.start_observation(name="attempt 0009", as_type="span", input={})
-    trace = observe.LangfuseAttempt(_client=client, _root=root, _model="m")
+    sdk = _FakeSdk(terminal_hook=lambda: released.wait(30))
+    trace = start(sdk)
 
     t0 = time.perf_counter()
     trace.end(StopReason.SUBMITTED, patch=DIFF)
     waited = time.perf_counter() - t0
-    released.set()  # let the daemon thread go before the test ends
+    released.set()
 
     assert waited < 5.0, f"end() blocked for {waited:.1f}s on a hanging flush"
     assert any("abandoned" in f for f in trace.failures), trace.failures
-    assert "tracing: flush" in capsys.readouterr().out
-    assert root.ended  # the span is still closed; only the send was given up on
-
-
-def test_a_flush_that_returns_is_not_reported_as_abandoned() -> None:
-    client = _FakeClient()
-    root = client.start_observation(name="attempt 0001", as_type="span", input={})
-    trace = observe.LangfuseAttempt(_client=client, _root=root, _model="m")
-    trace.end(StopReason.SUBMITTED)
-    assert client.flushed == 1 and trace.failures == ()
+    assert "tracing: end" in capsys.readouterr().out
+    assert sdk.only.agent_log[-1] == ("exit",)  # the agent is still left; only the send is not
 
 
 def test_a_failing_sdk_is_recorded_and_swallowed() -> None:
-    client = _FakeClient()
-    root = _Observation("attempt", "span", broken=True)
-    trace = observe.LangfuseAttempt(_client=client, _root=root, _model="m")
+    sdk = _FakeSdk(events_raise=True)
+    trace = start(sdk)
     trace.tool(1, "shell", {"cmd": "cat a"}, "contents")
     trace.end(StopReason.SUBMITTED)
-    assert any("shell" in f for f in trace.failures)
+    assert any("tool.result" in f for f in trace.failures)
+    assert sdk.only.terminal[0][2]["tracing_failures"] == list(trace.failures)
 
 
-class _Observation:
-    def __init__(self, name: str, as_type: str, broken: bool = False) -> None:
+class _FakeAgent:
+    def __init__(self, voyage: "_FakeVoyage", name: str, role: str | None) -> None:
+        self.voyage = voyage
         self.name = name
-        self.as_type = as_type
-        self.broken = broken
-        self.children: list[_Observation] = []
-        self.output: object = None
-        self.metadata: dict[str, object] = {}
-        self.trace_io: list[dict[str, object]] = []
-        self.ended = False
+        self.role = role
 
-    def _check(self) -> None:
-        if self.broken:
-            raise RuntimeError("langfuse is down")
+    def __enter__(self) -> "_FakeAgent":
+        self.voyage.agent_log.append(("enter", self.name, self.role))
+        return self
 
-    def start_observation(self, *, name: str, as_type: str, **kw: object) -> "_Observation":
-        self._check()
-        child = _Observation(name, as_type)
-        self.children.append(child)
-        return child
-
-    def update(self, **kw: object) -> None:
-        self._check()
-        if "output" in kw:
-            self.output = kw["output"]
-        extra = kw.get("metadata")
-        if isinstance(extra, dict):
-            self.metadata.update(extra)
-
-    def set_trace_io(self, **kw: object) -> None:
-        self._check()
-        self.trace_io.append(dict(kw))
-
-    def end(self) -> None:
-        self._check()
-        self.ended = True
+    def __exit__(self, *exc: object) -> None:
+        self.voyage.agent_log.append(("exit",))
 
 
-class _FakeClient:
-    def __init__(self) -> None:
-        self.roots: list[_Observation] = []
-        self.flushed = 0
+class _FakeVoyage:
+    def __init__(self, sdk: "_FakeSdk", name: str, metadata: dict[str, Any]) -> None:
+        self.sdk = sdk
+        self.id = "voy_1"
+        self.dashboard_url = "https://app.sailresearch.com/prod/voyages/voy_1"
+        self.name = name
+        self.metadata = metadata
+        self.events: list[tuple[str, dict[str, Any]]] = []
+        self.agent_log: list[tuple[object, ...]] = []
+        self.terminal: list[tuple[Any, ...]] = []
 
-    def start_observation(self, *, name: str, as_type: str, **kw: object) -> _Observation:
-        root = _Observation(name, as_type)
-        self.roots.append(root)
-        return root
+    def event(self, kind: str, *, payload: dict[str, Any]) -> None:
+        if self.sdk.events_raise:
+            raise RuntimeError("voyages are down")
+        self.events.append((kind, payload))
 
-    def flush(self) -> None:
-        self.flushed += 1
+    def agent(self, name: str, *, role: str | None = None) -> _FakeAgent:
+        return _FakeAgent(self, name, role)
+
+    def complete(self, message: str | None = None, payload: dict[str, Any] | None = None) -> None:
+        self.sdk.terminal_hook()
+        self.terminal.append(("complete", message, payload))
+
+    def fail(
+        self,
+        error_type: str = "harness_error",
+        message: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        self.sdk.terminal_hook()
+        self.terminal.append(("fail", error_type, message, payload))
+
+
+class _FakeSdk:
+    """Stands in for the ``sail.voyage`` module."""
+
+    def __init__(
+        self,
+        *,
+        create_raises: bool = False,
+        events_raise: bool = False,
+        create_hook: Callable[[], object] = lambda: None,
+        terminal_hook: Callable[[], object] = lambda: None,
+    ) -> None:
+        self.create_raises = create_raises
+        self.events_raise = events_raise
+        self.create_hook = create_hook
+        self.terminal_hook = terminal_hook
+        self.calls: list[str] = []
+        self.disabled_on: list[int] = []
+        self.voyages: list[_FakeVoyage] = []
+
+    def create(self, name: str, *, metadata: dict[str, Any]) -> _FakeVoyage:
+        self.calls.append("create")
+        self.create_hook()
+        if self.create_raises:
+            raise RuntimeError("voyages are down")
+        voyage = _FakeVoyage(self, name, metadata)
+        self.voyages.append(voyage)
+        return voyage
+
+    def disable(self) -> None:
+        self.calls.append("disable")
+        self.disabled_on.append(threading.get_ident())
+
+    @property
+    def only(self) -> _FakeVoyage:
+        assert len(self.voyages) == 1, f"expected one voyage, got {len(self.voyages)}"
+        return self.voyages[0]

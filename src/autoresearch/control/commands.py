@@ -59,9 +59,9 @@ def cmd_launch(args: argparse.Namespace) -> int:
         args.until,
         keep_control=args.keep_control,
     )
-    traced = [k for k in env.TRACING_KEYS if k in envs]
     print(f"started in the control box: {cmd}")
-    print("tracing keys forwarded: " + (", ".join(traced) if traced else "none"))
+    traced = load_config(Path(args.config)).observe.enabled
+    print("tracing: " + ("on, as Sail Voyages" if traced else "off in this config"))
     if args.keep_control:
         print("the control box stays up after the run: terminate it yourself, or autoresearch reap")
     else:

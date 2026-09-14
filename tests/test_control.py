@@ -62,14 +62,14 @@ def test_control_record_round_trip(tmp_path: Path) -> None:
 
 def test_launch_starts_a_detached_run_with_the_keys_only_in_env() -> None:
     box = FakeBox()
-    envs = {"SAIL_API_KEY": "sk_secret", "LANGFUSE_SECRET_KEY": "sk-lf-secret"}
+    envs = {"SAIL_API_KEY": "sk_secret"}
     cmd = ctl.launch(CFG, "configs/t1_w4d.toml", box, envs)
     assert box.started == [(cmd, envs)]
     assert cmd.startswith(f"cd {ctl.PACKAGE_DIR} && nohup sh -c ")
     assert f"{ctl.CLI} run configs/t1_w4d.toml" in cmd
     assert "/mnt/autoresearch/runs/t1_w4d.launch.log" in cmd and cmd.endswith("&")
     # No key may reach the command line: it is visible to anything reading ps.
-    assert "sk_secret" not in cmd and "sk-lf-secret" not in cmd
+    assert "sk_secret" not in cmd
     cmd = ctl.launch(CFG, "configs/t1_w4d.toml", FakeBox(), {"SAIL_API_KEY": "k"}, until=1)
     assert " --until 1;" in cmd
 

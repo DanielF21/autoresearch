@@ -114,7 +114,7 @@ volume = "autoresearch"
 mount = "/mnt/autoresearch"
 
 [observe]
-# Live tracing of worker attempts in Langfuse. A view only: the run directory
-# stays the record. Keys come from the environment, and without them this is a
+# Live tracing of worker attempts as Sail Voyages. A view only: the run directory
+# stays the record. The Sail key is the only key, and without it this is a
 # quiet no op.
 enabled = true

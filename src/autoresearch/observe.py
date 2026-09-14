@@ -19,6 +19,7 @@ failure actually took: see ``FLUSH_TIMEOUT_S``.
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 from collections.abc import Callable
@@ -30,14 +31,22 @@ from autoresearch.config import ObserveConfig, RunConfig
 from autoresearch.model.protocol import Message, ModelResponse
 from autoresearch.types import AttemptRef, Prediction, StopReason
 
-REQUIRED_KEYS = ("LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY")
+REQUIRED_KEYS = ("SAIL_API_KEY",)
 
-# How long an attempt will wait for its trace to reach the platform before
-# giving up on it. In t1_w4b three of twelve workers lost about forty seconds
-# each to a blocking ``flush``: the exporter met a five second read timeout and
-# retried with backoff, and because a slow call raises nothing, the try/except
-# around it never fired. 121 seconds of experiment for zero traces.
+# How long an attempt will wait on a blocking call to the platform before giving
+# up on it: starting the Voyage, and delivering its terminal event. In t1_w4b
+# three of twelve workers lost about forty seconds each to a blocking ``flush``:
+# the exporter met a five second read timeout and retried with backoff, and
+# because a slow call raises nothing, the try/except around it never fired. 121
+# seconds of experiment for zero traces. The Voyage SDK bounds each of these at
+# ten seconds, which still counts against the worker's own clock.
 FLUSH_TIMEOUT_S = 5.0
+
+# Text in an event is clipped to this, the same length the on disk transcript
+# keeps. The SDK replaces a payload over 64 KiB with a stub, so a whole file read
+# back by a tool would otherwise arrive as nothing.
+CLIP = 4000
+ARGUMENTS_CLIP = 1000
 
 
 class AttemptTrace(Protocol):
@@ -139,19 +148,69 @@ def start_attempt(tracer: Tracer, ref: AttemptRef, run_id: str, base_sha: str) -
         return NullAttempt()
 
 
-# ----- Langfuse ------------------------------------------------------------------------
+def _clip(s: str, n: int = CLIP) -> str:
+    return s if len(s) <= n else s[:n] + f"... [{len(s) - n} more]"
+
+
+def _bounded(
+    what: str,
+    fn: Callable[[], Any],
+    timeout: float,
+    gave_up: threading.Event | None = None,
+) -> tuple[Any, str]:
+    """Run ``fn`` and return its value and ``""``, or ``None`` and why not.
+
+    It also gives up on a call that is merely slow. The thread is left running
+    as a daemon rather than killed, since there is no safe way to interrupt a
+    socket read inside the SDK. It finishes or it dies with the process; either
+    way the attempt has already moved on, and ``gave_up`` is set so the call can
+    tell, when it does finish, that nobody is waiting for its result. The reason
+    is printed, because the trace it would annotate is the one that failed, so
+    the run's launch log is the only place it can be seen.
+    """
+    done: list[Any] = []
+    caught: list[str] = []
+
+    def run() -> None:
+        try:
+            done.append(fn())
+        except Exception as e:
+            caught.append(f"{what}: {e!r}")
+
+    t = threading.Thread(target=run, name=f"voyage-{what}", daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        if gave_up is not None:
+            gave_up.set()
+        failure = f"{what}: still running after {timeout:.0f}s, abandoned"
+    elif caught:
+        failure = caught[0]
+    else:
+        return done[0], ""
+    print(f"tracing: {failure}", flush=True)
+    return None, failure
+
+
+# ----- Sail Voyages --------------------------------------------------------------------
 
 
 @dataclass
-class LangfuseAttempt:
-    """One trace. Turn n's input is only what was added to the conversation since
-    turn n-1, because the first message holds the whole history and repeating it
-    on all eighty turns would be megabytes of identical text."""
+class VoyageAttempt:
+    """One Voyage, recorded as events through its handle.
 
-    _client: Any
-    _root: Any
-    _model: str
-    _scope: Any = None
+    Only explicit handle calls are used. Sail inference and box commands are not
+    attributed to the Voyage: the tracer disables the SDK's current Voyage as
+    soon as it is created, pins the worker's thread to that disabled state, and
+    turns the SDK's automatic spans off; see ``VoyageTracer`` and
+    ``build_tracer``. What the model was asked and answered is in ``model.turn``.
+
+    Turn n's message count is only what was added since turn n-1: the tool
+    results arrive as their own events, so the history is never resent.
+    """
+
+    _voyage: Any
+    _agent: Any = None
     _sent: int = 0
     _failures: list[str] = field(default_factory=list)
 
@@ -161,79 +220,50 @@ class LangfuseAttempt:
         except Exception as e:
             self._failures.append(f"{what}: {e!r}")
 
-    def _try_bounded(self, what: str, fn: Callable[[], None], timeout: float) -> None:
-        """``_try``, but it also gives up on a call that is merely slow.
-
-        The thread is left running as a daemon rather than killed, since there
-        is no safe way to interrupt a socket read inside the SDK. It finishes or
-        it dies with the process; either way the attempt has already moved on.
-        """
-        caught: list[str] = []
-
-        def run() -> None:
-            try:
-                fn()
-            except Exception as e:
-                caught.append(f"{what}: {e!r}")
-
-        t = threading.Thread(target=run, name=f"langfuse-{what}", daemon=True)
-        t.start()
-        t.join(timeout)
-        if t.is_alive():
-            # Nothing downstream reads ``_failures`` after this point, and the
-            # trace this would annotate is the one that failed to send, so the
-            # only place this can be seen is the run's launch log.
-            msg = f"{what}: still running after {timeout:.0f}s, abandoned"
-            self._failures.append(msg)
-            print(f"tracing: {msg}", flush=True)
-        else:
-            self._failures.extend(caught)
+    def _event(self, kind: str, payload: dict[str, Any]) -> None:
+        self._try(kind, lambda: self._voyage.event(kind, payload=payload))
 
     def box(self, box_id: str) -> None:
-        self._try("box", lambda: self._root.update(metadata={"box_id": box_id}))
+        self._event("box.ready", {"box_id": box_id})
 
     def model_turn(self, turn: int, messages: list[Message], response: ModelResponse) -> None:
-        def emit() -> None:
-            new = messages[self._sent :]
-            self._sent = len(messages)
-            gen = self._root.start_observation(
-                name=f"turn {turn}",
-                as_type="generation",
-                model=self._model,
-                input=new,
-            )
-            gen.update(
-                output={
-                    "content": response.content,
-                    "reasoning": response.reasoning,
-                    "tool_calls": [
-                        {"name": c.name, "arguments": c.arguments} for c in response.tool_calls
-                    ],
-                },
-                usage_details={
-                    "input_tokens": response.usage.prompt_tokens,
-                    "output_tokens": response.usage.completion_tokens,
-                },
-                metadata={
-                    "latency_s": round(response.latency_s, 3),
-                    "finish_reason": response.finish_reason,
-                    "cached_tokens": response.usage.cached_tokens,
-                    "reasoning_tokens": response.usage.reasoning_tokens,
-                },
-            )
-            gen.end()
-
-        self._try(f"turn {turn}", emit)
+        new = len(messages) - self._sent
+        self._sent = len(messages)
+        usage = response.usage
+        self._event(
+            "model.turn",
+            {
+                "turn": turn,
+                "new_messages": new,
+                "latency_s": round(response.latency_s, 3),
+                "finish_reason": response.finish_reason,
+                "input_tokens": usage.prompt_tokens,
+                "output_tokens": usage.completion_tokens,
+                "cached_tokens": usage.cached_tokens,
+                "reasoning_tokens": usage.reasoning_tokens,
+                "content": _clip(response.content),
+                "reasoning": _clip(response.reasoning),
+                "tool_calls": [
+                    {
+                        "name": c.name,
+                        "arguments": _clip(json.dumps(c.arguments, default=str), ARGUMENTS_CLIP),
+                    }
+                    for c in response.tool_calls
+                ],
+            },
+        )
 
     def tool(self, turn: int, name: str, args: dict[str, Any], result: str) -> None:
-        # Unclipped, unlike the on disk transcript: the whole point of looking
-        # here is to see what the agent actually got back.
-        def emit() -> None:
-            span = self._root.start_observation(name=name, as_type="tool", input=args)
-            span.update(output=result, metadata={"turn": turn})
-            span.end()
-
-        self._try(f"tool {name}", emit)
+        self._event(
+            "tool.result",
+            {
+                "turn": turn,
+                "name": name,
+                "arguments": _clip(json.dumps(args, default=str), ARGUMENTS_CLIP),
+                "result": _clip(result),
+                "result_chars": len(result),
+            },
+        )
 
     def end(
         self,
@@ -243,31 +273,36 @@ class LangfuseAttempt:
         prediction: Prediction | None = None,
         error: str = "",
     ) -> None:
-        output = {
+        # The agent context was entered when the attempt started and must be
+        # left on the same thread that entered it, which is this one.
+        if self._agent is not None:
+            agent, self._agent = self._agent, None
+            self._try("end agent", lambda: agent.__exit__(None, None, None))
+        output: dict[str, Any] = {
             "stop_reason": str(stop),
             "has_patch": bool(patch),
             "patch_bytes": len(patch or ""),
             "predicted_speedup": None if prediction is None else prediction.speedup,
-            "error": error,
+            "error": _clip(error),
         }
-        self._try("end output", lambda: self._root.update(output=output))
-        self._try("end trace io", lambda: self._root.set_trace_io(output=output))
         if self._failures:
-            failures = list(self._failures)
-            self._try(
-                "end failures",
-                lambda: self._root.update(metadata={"tracing_failures": failures}),
-            )
-        self._try("end span", self._root.end)
-        # The attributes scope was entered when the attempt started and must be
-        # left on the same thread that entered it, which is this one.
-        if self._scope is not None:
-            self._try("end scope", lambda: self._scope.__exit__(None, None, None))
-        # The control box can be terminated as soon as a run ends, so nothing
-        # may sit in the background queue waiting for a flush that never comes.
-        # Bounded, because this is the call that blocked three workers in
-        # t1_w4b: a trace may be lost, an attempt may not be held up.
-        self._try_bounded("flush", self._client.flush, FLUSH_TIMEOUT_S)
+            output["tracing_failures"] = list(self._failures)
+        voyage = self._voyage
+        if error:
+
+            def send() -> None:
+                voyage.fail(error_type=str(stop), message=_clip(error), payload=output)
+        else:
+
+            def send() -> None:
+                voyage.complete(message=str(stop), payload=output)
+
+        # Bounded, because the terminal call flushes and that is the call that
+        # blocked three workers in t1_w4b: a trace may be lost, an attempt may
+        # not be held up.
+        _, failure = _bounded("end", send, FLUSH_TIMEOUT_S)
+        if failure:
+            self._failures.append(failure)
 
     @property
     def failures(self) -> tuple[str, ...]:
@@ -275,43 +310,69 @@ class LangfuseAttempt:
 
 
 @dataclass
-class LangfuseTracer:
-    """One per run. Each attempt roots its own trace, which is what we want:
-    a round's workers are threads, and OpenTelemetry context is per thread."""
+class VoyageTracer:
+    """One per run. Each attempt is its own Voyage in the run's series.
 
-    _client: Any
+    ``_sdk`` is the ``sail.voyage`` module, a field so tests can stand in for it.
+    """
+
+    _sdk: Any
+    _series: str
     _model: str
-    _session_id: str
-    _attributes: Callable[..., Any] | None = None
 
     def attempt(self, ref: AttemptRef, run_id: str, base_sha: str) -> AttemptTrace:
-        # Session and tags come from an attributes scope, and only spans created
-        # inside it inherit them, so the scope is entered before the root span
-        # and left in ``end``. Entering and leaving happen on the worker's own
-        # thread, which is the whole of one attempt.
-        scope = None
-        if self._attributes is not None:
-            try:
-                scope = self._attributes(
-                    session_id=self._session_id,
-                    trace_name=f"{run_id} attempt {ref.dirname}",
-                    tags=[run_id, f"round-{ref.round}"],
-                )
-                scope.__enter__()
-            except Exception:
-                scope = None
-        try:
-            root = self._client.start_observation(
-                name=f"attempt {ref.dirname}",
-                as_type="agent",
-                input={"round": ref.round, "worker": ref.worker, "base_sha": base_sha},
-            )
-        except Exception:
-            if scope is not None:
+        sdk = self._sdk
+        metadata = {
+            "run_id": run_id,
+            "attempt": ref.dirname,
+            "number": ref.number,
+            "round": ref.round,
+            "worker": ref.worker,
+            "base_sha": base_sha,
+            "model": self._model,
+        }
+        # The SDK resolves a thread's Voyage from its own context first and the
+        # process wide fallback second. A worker thread never creates in its own
+        # context (``create`` runs on the bounded thread below), so without this
+        # its model calls would resolve the fallback, which between another
+        # attempt's ``create`` and ``disable`` is that other attempt's Voyage.
+        # Pinning this thread to the disabled state keeps its model calls out of
+        # every Voyage, whatever the fallback holds at the time.
+        with suppress(Exception):
+            sdk.disable()
+        gave_up = threading.Event()
+
+        def start() -> Any:
+            voyage = sdk.create(self._series, metadata=metadata)
+            # ``create`` also makes this the process wide fallback Voyage, which
+            # every thread without its own resolves to: the box threads of this
+            # worker, other workers and the referee. Reset at once, in the same
+            # thread, so nothing is attributed by accident, even when this runs
+            # after the bound has given up on it.
+            sdk.disable()
+            if gave_up.is_set():
+                # Nobody will end this Voyage, so end it here rather than leave
+                # it running on the dashboard for good.
                 with suppress(Exception):
-                    scope.__exit__(None, None, None)
+                    voyage.fail(
+                        error_type="tracing_abandoned",
+                        message=f"the attempt did not wait {FLUSH_TIMEOUT_S:.0f}s for this"
+                        " Voyage to start; it ran untraced",
+                    )
+            return voyage
+
+        voyage, _ = _bounded(f"start {ref.dirname}", start, FLUSH_TIMEOUT_S, gave_up)
+        if voyage is None or voyage.id is None:
             return NullAttempt()
-        return LangfuseAttempt(_client=self._client, _root=root, _model=self._model, _scope=scope)
+        trace = VoyageAttempt(_voyage=voyage)
+        try:
+            agent = voyage.agent("Worker", role="worker")
+            agent.__enter__()
+            trace._agent = agent
+        except Exception as e:
+            trace._failures.append(f"agent: {e!r}")
+        print(f"tracing: attempt {ref.dirname} {voyage.dashboard_url}", flush=True)
+        return trace
 
 
 def build_tracer(config: RunConfig) -> Tracer:
@@ -327,22 +388,20 @@ def build_tracer(config: RunConfig) -> Tracer:
         print(f"tracing off: {' and '.join(missing)} not set", flush=True)
         return NullTracer()
     try:
-        from langfuse import get_client, propagate_attributes
-
-        client = get_client()
-        if not client.auth_check():
-            print("tracing off: langfuse rejected the keys", flush=True)
-            return NullTracer()
+        from sail import voyage as sdk
     except Exception as e:
-        print(f"tracing off: langfuse client failed: {e!r}", flush=True)
+        print(f"tracing off: sail.voyage failed to import: {e!r}", flush=True)
         return NullTracer()
-    print(f"tracing on: session {session_id(observe, config.run_id)}", flush=True)
-    return LangfuseTracer(
-        _client=client,
-        _model=config.worker.model,
-        _session_id=session_id(observe, config.run_id),
-        _attributes=propagate_attributes,
-    )
+    # The SDK synthesises a span for any box command or model call made while a
+    # Voyage is current, and a fresh thread (every box command runs on one) is
+    # current on the process wide fallback. That fallback is an attempt's Voyage
+    # for the moment between its ``create`` and ``disable``, so with the switch
+    # on, another worker's box command in that moment would land in its trace.
+    # Off, and only the events this module emits through a handle are recorded.
+    os.environ.setdefault("SAIL_VOYAGE_AUTO_SPANS", "0")
+    series = session_id(observe, config.run_id)
+    print(f"tracing on: voyage series {series}", flush=True)
+    return VoyageTracer(_sdk=sdk, _series=series, _model=config.worker.model)
 
 
 def session_id(observe: ObserveConfig, run_id: str) -> str:
