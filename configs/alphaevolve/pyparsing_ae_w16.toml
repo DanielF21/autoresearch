@@ -1,0 +1,203 @@
+# pyparsing: AlphaEvolve, built in src/alphaevolve, against the harness on one curve of
+# tokens spent against best held out speedup. Target, referee, boxes and storage are
+# copied unchanged from configs/pyparsing_control_of_w16.toml, whose target section is
+# configs/seeded/pyparsing_w16.toml verbatim; [worker] keeps the same model settings.
+# width is candidates per batch and referee boxes held. 64 rounds end the run;
+# budget_tokens is set far above what 64 rounds spend, so it never binds.
+
+[run]
+run_id = "pyparsing_ae_w16"
+width = 16
+rounds = 64
+
+[target]
+name = "pyparsing"
+repo = "https://github.com/pyparsing/pyparsing"
+sha = "efd56db4e59f36b1673ce0eb0823e3afaa9d1201"
+package = "pyparsing"
+alias = "pp"
+package_root = "."
+hot_file = "pyparsing/core.py"
+call = "grammar.parse_string(text, parse_all=True)"
+pip = ["railroad-diagrams", "jinja2", "matplotlib"]
+allow = ["pyparsing/**"]
+deny = ["tests/**", "docs/**", "examples/**"]
+fingerprint = "list(result)[:20] + [len(result), list(result)[-5:]]"
+docs = ["configs/seeded/docs/pyparsing_w16/profile_inputs.txt", "configs/seeded/docs/pyparsing_w16/profile_flat_long_flat.txt", "configs/seeded/docs/pyparsing_w16/profile_flat_long_callers.txt"]
+
+[target.tests]
+module = "tests/test_unit.py"
+full = "tests"
+
+# regime: depth 0; long flat sequence of 5000 operands; ZeroOrMore/And loops dominate
+# why: No parentheses reach the recursive Forward path, so nearly all time is in
+#      CharsNotIn plus repeated _MultipleMatch and And parsing.
+[[target.inputs]]
+name = "flat_long"
+noise_floor = 1.0188   # calibrated 20260914-064859, 42 null pairs
+setup = '''
+import random
+pp.ParserElement.disable_memoization()
+rnd = random.Random(SEED)
+ops = ("+", "-", "*", "/")
+number = pp.CharsNotIn("+-*/()").set_name("number")
+muldiv = (pp.Literal("*") | pp.Literal("/")).set_name("muldiv")
+addsub = (pp.Literal("+") | pp.Literal("-")).set_name("addsub")
+lpar = pp.Suppress("(")
+rpar = pp.Suppress(")")
+expr = pp.Forward().set_name("expr")
+atom = (number | lpar + expr + rpar).set_name("atom")
+term = (atom + pp.ZeroOrMore(muldiv + atom)).set_name("term")
+expr <<= term + pp.ZeroOrMore(addsub + term)
+grammar = expr
+num = lambda: str(rnd.randint(100000, 999999))
+n_terms = 5000
+text = num() + "".join(rnd.choice(ops) + num() for _ in range(n_terms - 1))
+'''
+
+# regime: depth 1; many small parenthesized subexpressions; repeated shallow recursive
+#         Forward entry
+# why: Each group enters lpar+expr+rpar and exits immediately, so shallow recursion
+#      alternates with the outer sequence loops.
+[[target.inputs]]
+name = "shallow_groups"
+noise_floor = 1.0181   # calibrated 20260914-064859, 42 null pairs
+setup = '''
+import random
+pp.ParserElement.disable_memoization()
+rnd = random.Random(SEED)
+ops = ("+", "-", "*", "/")
+number = pp.CharsNotIn("+-*/()").set_name("number")
+muldiv = (pp.Literal("*") | pp.Literal("/")).set_name("muldiv")
+addsub = (pp.Literal("+") | pp.Literal("-")).set_name("addsub")
+lpar = pp.Suppress("(")
+rpar = pp.Suppress(")")
+expr = pp.Forward().set_name("expr")
+atom = (number | lpar + expr + rpar).set_name("atom")
+term = (atom + pp.ZeroOrMore(muldiv + atom)).set_name("term")
+expr <<= term + pp.ZeroOrMore(addsub + term)
+grammar = expr
+num = lambda: str(rnd.randint(100000, 999999))
+groups = []
+for _ in range(1500):
+    groups.append("(" + num() + rnd.choice(ops) + num() + ")")
+text = groups[0] + "".join(rnd.choice(("+", "-")) + g for g in groups[1:])
+'''
+
+# regime: depth 11; broad balanced binary expression tree with 2048 leaves; mixed
+#         recursion and broad branching
+# why: Every internal node goes through a parenthesized recursive expr, while the node
+#      count stresses both Forward recursion and leaf parsing.
+[[target.inputs]]
+name = "balanced_bush"
+noise_floor = 1.0358   # calibrated 20260914-064859, 42 null pairs
+setup = '''
+import random
+pp.ParserElement.disable_memoization()
+rnd = random.Random(SEED)
+ops = ("+", "-", "*", "/")
+number = pp.CharsNotIn("+-*/()").set_name("number")
+muldiv = (pp.Literal("*") | pp.Literal("/")).set_name("muldiv")
+addsub = (pp.Literal("+") | pp.Literal("-")).set_name("addsub")
+lpar = pp.Suppress("(")
+rpar = pp.Suppress(")")
+expr = pp.Forward().set_name("expr")
+atom = (number | lpar + expr + rpar).set_name("atom")
+term = (atom + pp.ZeroOrMore(muldiv + atom)).set_name("term")
+expr <<= term + pp.ZeroOrMore(addsub + term)
+grammar = expr
+num = lambda: str(rnd.randint(100000, 999999))
+def tree(depth):
+    if depth == 0:
+        return num()
+    return "(" + tree(depth - 1) + rnd.choice(ops) + tree(depth - 1) + ")"
+text = tree(11)
+'''
+
+# regime: depth 60; 40 narrow nested chains; recursive descent through deep Forward
+#         nests
+# why: The parser repeatedly descends long parenthesized Forward nests, so recursive
+#      parsing dominates over long ZeroOrMore loops.
+[[target.inputs]]
+name = "deep_forest"
+noise_floor = 1.0272   # calibrated 20260914-064859, 42 null pairs
+setup = '''
+import random
+pp.ParserElement.disable_memoization()
+rnd = random.Random(SEED)
+ops = ("+", "-", "*", "/")
+number = pp.CharsNotIn("+-*/()").set_name("number")
+muldiv = (pp.Literal("*") | pp.Literal("/")).set_name("muldiv")
+addsub = (pp.Literal("+") | pp.Literal("-")).set_name("addsub")
+lpar = pp.Suppress("(")
+rpar = pp.Suppress(")")
+expr = pp.Forward().set_name("expr")
+atom = (number | lpar + expr + rpar).set_name("atom")
+term = (atom + pp.ZeroOrMore(muldiv + atom)).set_name("term")
+expr <<= term + pp.ZeroOrMore(addsub + term)
+grammar = expr
+num = lambda: str(rnd.randint(100000, 999999))
+def deep_expr(depth):
+    out = num()
+    for _ in range(depth):
+        if rnd.random() < 0.5:
+            out = "(" + out + rnd.choice(ops) + num() + ")"
+        else:
+            out = "(" + num() + rnd.choice(ops) + out + ")"
+    return out
+chains = [deep_expr(60) for _ in range(40)]
+text = chains[0] + "".join(rnd.choice(("+", "-")) + c for c in chains[1:])
+'''
+
+[worker]
+model = "zai-org/GLM-5.3"   # from round 42; rounds 1 to 41 ran deepseek/deepseek-v4-pro-0813 (endpoint timeouts)
+reasoning_effort = "high"
+completion_window = "asap"
+max_turns = 240
+max_seconds = 10800
+max_input_tokens = 24000000
+turn_timeout = 900              # seconds per model request; raised from 600 at round 34 after endpoint timeouts
+inference_retries = 3           # tries after the first for a request that timed out or failed transiently
+
+[referee]
+measurement_timeout = 600   # seconds for one whole measurement, both repos
+stop_on_failed_tests = true   # a candidate that fails a test suite is not measured further
+pairs = 6
+repeats_per_launch = 7
+min_clean_pairs = 4
+hash_seeds = [0, 1, 2, 3, 4]
+
+[boxes]
+worker_size = "m"
+referee_size = "m"
+control_size = "m"
+disk_gib = 32
+
+[storage]
+volume = "autoresearch"
+mount = "/mnt/autoresearch"
+
+[observe]
+enabled = true
+session_prefix = ""
+
+# Every value below but the budget is OpenEvolve's default: codelion/openevolve at
+# 411fb59c886c18704caaffb611e17cf9e7d824d2, configs/default_config.yaml and the
+# DatabaseConfig and PromptConfig classes in openevolve/config.py. The AlphaEvolve
+# paper publishes no database parameters.
+[evolve]
+budget_tokens = 1000000000        # not binding: 64 rounds end the run
+seed = 42                        # random_seed
+population_size = 1000
+archive_size = 100
+num_islands = 5
+migration_interval = 50          # generations, counted per island
+migration_rate = 0.1
+elite_selection_ratio = 0.1
+exploration_ratio = 0.2
+exploitation_ratio = 0.7
+feature_bins = 10
+diversity_reference_size = 20
+num_top_programs = 3
+num_diverse_programs = 2
+max_code_length = 10000          # characters of evolvable code, the cap on the blocks

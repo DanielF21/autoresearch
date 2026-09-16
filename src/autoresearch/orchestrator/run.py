@@ -15,6 +15,7 @@ import datetime as dt
 import os
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from autoresearch import history
@@ -111,6 +112,7 @@ def run(
     *,
     until_round: int | None = None,
     log: Path | None = None,
+    stop: Callable[[history.RunPaths], bool] | None = None,
 ) -> int:
     """Run rounds from the next incomplete one to ``until_round`` or the config's total.
 
@@ -120,18 +122,22 @@ def run(
     kept for a later launch, which builds its own referees. A box that will not
     terminate is logged, left in boxes.json, and raised as a BoxError, except
     when an exception is already on its way out, which is never replaced.
+
+    ``stop`` ends the run early: it is read before the first round and after
+    every round, and a run it ends is complete. None, the default, is every run
+    the harness itself launches; the AlphaEvolve comparison passes a token budget.
     """
     history.acquire_lock(paths)
     pool = RefereePool(config, paths, boxes)
     try:
         try:
-            last = _rounds(config, paths, worker, pool, until_round, log)
+            last, stopped = _rounds(config, paths, worker, pool, until_round, log, stop)
         except BaseException:
             _log_teardown(log, pool.terminate_all())
             raise
         failures = pool.terminate_all()
         _log_teardown(log, failures)
-        if last >= config.rounds:
+        if last >= config.rounds or stopped:
             commit_run(paths, "run complete")
         if failures:
             raise BoxError(
@@ -150,15 +156,20 @@ def _rounds(
     pool: RefereePool,
     until_round: int | None,
     log: Path | None,
-) -> int:
-    """The rounds themselves. Teardown is the caller's, so no exit path here can skip it."""
+    stop: Callable[[history.RunPaths], bool] | None = None,
+) -> tuple[int, bool]:
+    """The rounds themselves, and whether ``stop`` ended them. Teardown is the
+    caller's, so no exit path here can skip it."""
     start = check_consistent(paths, config)
-    stop = min(config.rounds, until_round or config.rounds)
-    if start > stop:
-        return start - 1
+    final = min(config.rounds, until_round or config.rounds)
+    if start > final:
+        return start - 1, False
+    if stop is not None and stop(paths):
+        _log(log, f"stop condition already met before round {start}; nothing to run")
+        return start - 1, True
     pool.start()
     last = start - 1
-    for round_no in range(start, stop + 1):
+    for round_no in range(start, final + 1):
         # A start line, not only a finish line. The log used to gain nothing
         # until a round completed, so a round that never completed was
         # indistinguishable from one that had not started, and a stalled run
@@ -194,4 +205,7 @@ def _rounds(
             )
             _log(log, message)
             raise RunError(message)
-    return last
+        if stop is not None and stop(paths):
+            _log(log, f"round {round_no}: stop condition met, run complete at {_now()}")
+            return last, True
+    return last, False

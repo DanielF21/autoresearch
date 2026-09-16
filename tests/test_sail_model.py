@@ -2,6 +2,7 @@
 The network path is exercised by Phase 2b."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -118,3 +119,51 @@ def test_transient_classification() -> None:
     assert not _is_transient(_FakeError(400))
     assert _is_transient(_FakeError(None, retryable=True))
     assert not _is_transient(RuntimeError("x"))
+
+
+class _Completions:
+    def __init__(self, failures: int) -> None:
+        self.failures = failures
+        self.calls: list[str] = []
+
+    def create(self, **kwargs: object) -> Any:
+        headers = kwargs["headers"]
+        assert isinstance(headers, dict)
+        self.calls.append(str(headers["Idempotency-Key"]))
+        if len(self.calls) <= self.failures:
+            raise _FakeError(None, retryable=True)
+        return RAW
+
+
+def _client(
+    retries: int, failures: int, monkeypatch: pytest.MonkeyPatch
+) -> tuple[SailChatModel, _Completions]:
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    monkeypatch.setattr("autoresearch.model.sail_model.time.sleep", lambda _s: None)
+    completions = _Completions(failures)
+    model = SailChatModel.__new__(SailChatModel)
+    cfg = load_config(ROOT / "configs" / "t1_w4d.toml").worker
+    model._config = replace(cfg, inference_retries=retries)
+    model._sail = SimpleNamespace(
+        inference=SimpleNamespace(chat=SimpleNamespace(completions=completions))  # type: ignore[assignment]
+    )
+    return model, completions
+
+
+def test_a_transient_failure_is_retried_up_to_the_configured_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model, completions = _client(retries=3, failures=3, monkeypatch=monkeypatch)
+    assert model.complete([], [], cache_key="k").usage.prompt_tokens == 387
+    assert len(completions.calls) == 4 and len(set(completions.calls)) == 1  # one idempotency key
+
+    model, completions = _client(retries=3, failures=4, monkeypatch=monkeypatch)
+    with pytest.raises(ModelError):
+        model.complete([], [], cache_key="k")
+    assert len(completions.calls) == 4
+
+    model, completions = _client(retries=1, failures=1, monkeypatch=monkeypatch)
+    model.complete([], [], cache_key="k")
+    assert len(completions.calls) == 2  # the harness default: one retry

@@ -302,3 +302,48 @@ def test_not_toml() -> None:
 def test_source_text_is_kept_verbatim() -> None:
     text = PILOT.read_text()
     assert parse_config(text).source_text == text
+
+
+def test_the_measurement_timeout_is_optional_and_positive() -> None:
+    from pathlib import Path
+
+    import pytest
+
+    from autoresearch.config import ConfigError, parse_config
+
+    text = (Path(__file__).parent.parent / "configs" / "t1_w4d.toml").read_text()
+    assert parse_config(text).referee.measurement_timeout is None
+    capped = text.replace("[referee]\n", "[referee]\nmeasurement_timeout = 600\n", 1)
+    assert parse_config(capped).referee.measurement_timeout == 600
+    with pytest.raises(ConfigError, match="measurement_timeout"):
+        parse_config(text.replace("[referee]\n", "[referee]\nmeasurement_timeout = 0\n", 1))
+
+
+def test_stop_on_failed_tests_is_optional_and_boolean() -> None:
+    from pathlib import Path
+
+    import pytest
+
+    from autoresearch.config import ConfigError, parse_config
+
+    text = (Path(__file__).parent.parent / "configs" / "t1_w4d.toml").read_text()
+    assert parse_config(text).referee.stop_on_failed_tests is False
+    on = text.replace("[referee]\n", "[referee]\nstop_on_failed_tests = true\n", 1)
+    assert parse_config(on).referee.stop_on_failed_tests is True
+    with pytest.raises(ConfigError, match="stop_on_failed_tests"):
+        parse_config(text.replace("[referee]\n", "[referee]\nstop_on_failed_tests = 1\n", 1))
+
+
+def test_inference_retries_default_to_one() -> None:
+    from pathlib import Path
+
+    import pytest
+
+    from autoresearch.config import ConfigError, parse_config
+
+    text = (Path(__file__).parent.parent / "configs" / "t1_w4d.toml").read_text()
+    assert parse_config(text).worker.inference_retries == 1
+    three = text.replace("[worker]\n", "[worker]\ninference_retries = 3\n", 1)
+    assert parse_config(three).worker.inference_retries == 3
+    with pytest.raises(ConfigError, match="inference_retries"):
+        parse_config(text.replace("[worker]\n", "[worker]\ninference_retries = -1\n", 1))

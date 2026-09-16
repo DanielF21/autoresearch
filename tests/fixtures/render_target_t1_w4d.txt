@@ -1,0 +1,37 @@
+## Target
+
+Repository: https://github.com/networkx/networkx at commit c94928ed9489, the original for every attempt.
+Package: `networkx`, imported from `networkx` in the tree, bound to `nx` below.
+Hot file: networkx/algorithms/cluster.py
+Its tests: networkx/algorithms/tests/test_cluster.py
+Benchmark call: `nx.clustering(G)`
+Allowed files: networkx/**. Never: networkx/**/tests/**, benchmarks/**.
+
+### Inputs
+
+The same call is timed on every one of these, 6 back to back pairs each, on every submission. They are not variations to pick between: your patch is measured on all of them. Each input is the statements below, run once with `nx` bound to the package, `ROOT` to the tree and `SEED` to an integer, and then the call is timed in that namespace.
+
+```
+er1000_005  (floor 1.0106)
+    G = nx.erdos_renyi_graph(1000, 0.05, seed=42 + SEED, directed=True)
+
+er1000_001  (floor 1.0151)
+    G = nx.erdos_renyi_graph(1000, 0.01, seed=42 + SEED, directed=True)
+
+er1000_0002  (floor 1.0280)
+    G = nx.erdos_renyi_graph(1000, 0.002, seed=42 + SEED, directed=True)
+
+gn800  (floor 1.0218)
+    G = nx.gn_graph(800, seed=3 + SEED)
+
+er1600_002  (floor 1.0193)
+    G = nx.erdos_renyi_graph(1600, 0.02, seed=42 + SEED, directed=True)
+```
+
+`SEED` picks the instance of an input its setup builds. You are shown seed 0, and run_benchmark times it. The referee times seed 0 and one seed you are never shown, drawn fresh for every measurement, and records the ratio on the seed you did not see. A patch that is far faster on seed 0 than on the other is recorded as overfit and is not a speedup. The timed region is the call and a walk over its result that touches every element, so work deferred into a lazy container is still paid.
+
+Speedup on one input is the original's time divided by your patched time, taken as the median over that input's pairs. 2.00x is twice as fast, 0.50x is half as fast, 1.00x is no change. Each input has its own floor above, because a call of a few milliseconds is noisier than one of a second; below its floor a change cannot be told apart from a patch that does nothing.
+
+**Your recorded speedup is the geometric mean across all 5.** A patch that is 100x on one input and unchanged on the other 4 scores 2.51x, the same as one that is 2.51x everywhere. Doubling every input doubles your score; doubling one of 5 multiplies it by 1.149. Breadth counts for 5 times what depth counts for.
+
+**A patch that is slower on any input is not a speedup at all**, however fast it is elsewhere. Slower means below 1/floor for that input, the mirror of the test above. This is the rule a fast path tends to fall foul of: setup cost is paid on every call, so a path that pays for itself where the call is expensive can lose where the call is cheap, and a guard on the wrong property will not prevent that. run_benchmark times every input, so run it before you submit.

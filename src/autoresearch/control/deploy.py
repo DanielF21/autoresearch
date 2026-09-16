@@ -32,6 +32,9 @@ CONTROL_RECORD = Path("runs") / "control.json"
 # package is guaranteed importable by whatever installed it.
 PYTHON = '"$(command -v python3 || command -v python)"'
 CLI = f"{PYTHON} -m autoresearch"
+# The packages whose ``run`` command a launch may start. The AlphaEvolve
+# comparison lives beside the harness in src/ and runs on the same control box.
+RUN_PROGRAMS = ("autoresearch", "alphaevolve")
 UPLOAD_IGNORE = (
     ".git",
     ".venv",
@@ -96,7 +99,8 @@ def deploy(
         box.upload_dir(staging, PACKAGE_DIR)
         r = box.run(
             f"cd {PACKAGE_DIR} && {PYTHON} -m pip install -q -e . "
-            f"&& {CLI} --help >/dev/null && echo installed",
+            f"&& {CLI} --help >/dev/null && {PYTHON} -m alphaevolve --help >/dev/null "
+            "&& echo installed",
             timeout=900,
         )
         if not r.ok or "installed" not in r.stdout:
@@ -123,6 +127,7 @@ def launch_command(
     *,
     control_box_id: str = "",
     keep_control: bool = False,
+    program: str = "autoresearch",
 ) -> str:
     """The detached command that runs one setting inside the control box.
 
@@ -131,10 +136,15 @@ def launch_command(
     run whether the run succeeded or not: a control box outliving its last run
     is idle and never sleeps. The run directory is on the volume, so nothing is
     lost, and ``fetch`` brings up a temporary box when the control box is gone.
+
+    ``program`` is the package whose ``run`` starts; release is always the
+    harness's own command.
     """
+    if program not in RUN_PROGRAMS:
+        raise ValueError(f"no run command in {program!r}; known: {RUN_PROGRAMS}")
     log = f"{config.storage.mount}/runs/{config.run_id}.launch.log"
     stop = f" --until {until}" if until is not None else ""
-    script = f"{CLI} run {config_path} --repo-root {PACKAGE_DIR}{stop}"
+    script = f"{PYTHON} -m {program} run {config_path} --repo-root {PACKAGE_DIR}{stop}"
     if control_box_id and not keep_control:
         script += f"; {CLI} release-control {config_path} {control_box_id}"
     return f"cd {PACKAGE_DIR} && nohup sh -c {shlex.quote(script)} >> {log} 2>&1 &"
@@ -148,17 +158,23 @@ def launch(
     until: int | None = None,
     *,
     keep_control: bool = False,
+    program: str = "autoresearch",
 ) -> str:
     """Start the run. The keys live only in that process's environment."""
     cmd = launch_command(
-        config, config_path, until, control_box_id=box.box_id, keep_control=keep_control
+        config,
+        config_path,
+        until,
+        control_box_id=box.box_id,
+        keep_control=keep_control,
+        program=program,
     )
     box.start(cmd, env=env)
     return cmd
 
 
 def other_runs(proc: Path = Path("/proc"), own_pid: int | None = None) -> tuple[int, ...]:
-    """Pids of ``autoresearch run`` processes on this machine other than ``own_pid``.
+    """Pids of ``autoresearch run`` or ``alphaevolve run`` processes other than ``own_pid``.
 
     Read from /proc and matched on whole argv elements, not on a substring of the
     command line: the ``sh -c`` wrapping a launch carries the entire script as one
@@ -176,7 +192,7 @@ def other_runs(proc: Path = Path("/proc"), own_pid: int | None = None) -> tuple[
         except OSError:
             continue
         words = [w.decode(errors="replace") for w in raw.split(b"\0")]
-        if any(Path(w).name == "autoresearch" and n == "run" for w, n in pairwise(words)):
+        if any(Path(w).name in RUN_PROGRAMS and n == "run" for w, n in pairwise(words)):
             found.append(int(entry.name))
     return tuple(sorted(found))
 

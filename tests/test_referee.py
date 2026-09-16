@@ -519,3 +519,87 @@ def test_null_pairs_time_a_held_out_seed_per_round(config: RunConfig) -> None:
         assert [p.seed for p in pairs] == [11] * 6 + [22] * 6
     verifies = [c for c in box.commands if "--verify" in c]
     assert all(arg(c, "--seed") == "0" for c in verifies)
+
+
+def test_the_measurement_cap_stops_at_once_and_marks_the_box_for_rebuild(
+    config: RunConfig,
+) -> None:
+    """Every guest command here takes 100 s on the fake clock, under a 600 s cap:
+    each command is given only what is left, and the one that would start with
+    nothing left ends the measurement."""
+    capped = replace(config, referee=replace(config.referee, measurement_timeout=600))
+    now = [0.0]
+    seen: list[tuple[str, int]] = []
+    box = make_box(speedup=1.05)
+    real_run = box.run
+
+    def slow_run(command: str, *, timeout: int, env=None, cwd=None):  # type: ignore[no-untyped-def]
+        seen.append((command, timeout))
+        now[0] += 100.0
+        return real_run(command, timeout=timeout, env=env, cwd=cwd)
+
+    box.run = slow_run  # type: ignore[method-assign]
+    ref = Referee(box, capped, clock=lambda: now[0])
+    ref.setup()
+    m = ref.measure(PRECOMPUTE)
+    assert any("measurement cap of 600 s reached" in e for e in m.errors)
+    assert ref.broken and not m.clears_noise
+    assert set(m.untimed) == {i.name for i in config.target.inputs}
+    timeouts = {
+        ("module" if "--scope module" in c else "full"): t for c, t in seen if "run_tests.py" in c
+    }
+    assert timeouts == {"module": 400, "full": 300}
+    assert any("--remove" in c for c, _ in seen)  # worktrees are still cleaned up
+
+
+def test_without_a_cap_every_step_keeps_its_own_timeout(config: RunConfig) -> None:
+    seen: list[int] = []
+    box = make_box(speedup=1.05)
+    real_run = box.run
+
+    def recording_run(command: str, *, timeout: int, env=None, cwd=None):  # type: ignore[no-untyped-def]
+        if "run_tests.py" in command:
+            seen.append(timeout)
+        return real_run(command, timeout=timeout, env=env, cwd=cwd)
+
+    box.run = recording_run  # type: ignore[method-assign]
+    ref = Referee(box, config, clock=lambda: 1e9)
+    ref.setup()
+    ref.measure(PRECOMPUTE)
+    assert seen == [1200, 1200] and not ref.broken
+
+
+def _stopping(config: RunConfig) -> RunConfig:
+    return replace(config, referee=replace(config.referee, stop_on_failed_tests=True))
+
+
+def test_a_failed_module_suite_ends_the_measurement_when_set(config: RunConfig) -> None:
+    box = make_box(speedup=1.05, module_ok=False)
+    m = _referee(box, _stopping(config)).measure(PRECOMPUTE)
+    assert [t.scope for t in m.tests] == ["module"] and not m.tests_pass
+    assert any("module tests failed; the rest was not measured" in e for e in m.errors)
+    assert not any("--scope full" in c for c in box.commands)
+    assert not any("time_target.py" in c for c in box.commands)
+    assert any("--remove" in c for c in box.commands)  # worktrees are still cleaned up
+    assert not m.clears_noise
+
+
+def test_a_failed_full_suite_ends_the_measurement_when_set(config: RunConfig) -> None:
+    box = make_box(speedup=1.05, full_ok=False)
+    m = _referee(box, _stopping(config)).measure(PRECOMPUTE)
+    assert [t.scope for t in m.tests] == ["module", "full"]
+    assert any("full tests failed; the rest was not measured" in e for e in m.errors)
+    assert not any("time_target.py" in c for c in box.commands)
+
+
+def test_a_passing_patch_is_measured_in_full_when_set(config: RunConfig) -> None:
+    box = make_box(speedup=1.05)
+    m = _referee(box, _stopping(config)).measure(PRECOMPUTE)
+    assert m.tests_pass and not m.untimed and m.clears_noise
+
+
+def test_without_the_setting_a_failed_patch_is_still_measured_in_full(config: RunConfig) -> None:
+    box = make_box(speedup=1.05, module_ok=False)
+    m = _referee(box, config).measure(PRECOMPUTE)
+    assert [t.scope for t in m.tests] == ["module", "full"]
+    assert any("time_target.py" in c for c in box.commands)

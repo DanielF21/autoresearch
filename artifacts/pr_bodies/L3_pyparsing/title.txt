@@ -1,1 +1,0 @@
-Speed up MatchFirst and Or built from many Literal alternatives

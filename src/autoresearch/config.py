@@ -187,6 +187,9 @@ class WorkerConfig:
     # Whether the first message carries the history index table. Off, the
     # worker learns the history from the directory alone.
     history_index: bool = True
+    # Extra tries for a model request that failed in a way the endpoint calls
+    # transient, a timeout included. One, the default, is every harness run.
+    inference_retries: int = 1
 
 
 @dataclass(frozen=True)
@@ -202,6 +205,17 @@ class RefereeConfig:
     # ones that fail, so a retry costs seconds; the width experiment lost an
     # input on 13 of 912 attempts with one retry.
     timing_retries: int = 2
+    # Seconds one whole measurement may take, across every step. None, the
+    # default, is every harness run: each step has only its own timeout. The
+    # AlphaEvolve configs set it, because a single shot patch that hangs the
+    # target would otherwise hold a round for every step's timeout in turn.
+    measurement_timeout: int | None = None
+    # Stop measuring once a test suite has failed: no full suite after a failed
+    # module suite, and no input checks or timing after either. False, the
+    # default, is every harness run, where a failed patch is measured in full
+    # because the next workers read the record. The AlphaEvolve configs set it:
+    # a failed candidate scores 0 however much more is measured.
+    stop_on_failed_tests: bool = False
 
 
 @dataclass(frozen=True)
@@ -321,6 +335,14 @@ def _history_index(worker: dict[str, Any], prompts: tuple[str, ...]) -> bool:
             "[worker].history_index = false cannot be combined with prompt v0, whose text "
             "tells the worker the history table is in the first message"
         )
+    return raw
+
+
+def _inference_retries(worker: dict[str, Any]) -> int:
+    """``[worker].inference_retries``: absent means one retry."""
+    raw = worker.get("inference_retries", 1)
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+        raise ConfigError("[worker].inference_retries must be an integer of at least 0")
     return raw
 
 
@@ -475,6 +497,12 @@ def parse_config(text: str) -> RunConfig:
         or not all(isinstance(s, int) for s in seeds_raw)
     ):
         raise ConfigError("[referee].hash_seeds must be a non empty list of integers")
+    cap = referee.get("measurement_timeout")
+    if cap is not None and (isinstance(cap, bool) or not isinstance(cap, int) or cap < 1):
+        raise ConfigError("[referee].measurement_timeout must be a number of seconds, at least 1")
+    stop_on_fail = referee.get("stop_on_failed_tests", False)
+    if not isinstance(stop_on_fail, bool):
+        raise ConfigError("[referee].stop_on_failed_tests must be true or false")
 
     width = _positive_int(run, "run", "width")
     prompts = _prompt_versions(worker)
@@ -494,6 +522,7 @@ def parse_config(text: str) -> RunConfig:
             prompts=prompts,
             hidden_slots=_hidden_slots(worker, width),
             history_index=_history_index(worker, prompts),
+            inference_retries=_inference_retries(worker),
         ),
         referee=RefereeConfig(
             pairs=pairs,
@@ -501,6 +530,8 @@ def parse_config(text: str) -> RunConfig:
             min_clean_pairs=min_clean,
             hash_seeds=tuple(seeds_raw),
             timing_retries=retries,
+            measurement_timeout=cap,
+            stop_on_failed_tests=stop_on_fail,
         ),
         boxes=BoxConfig(
             worker_size=_size(boxes, "boxes", "worker_size"),

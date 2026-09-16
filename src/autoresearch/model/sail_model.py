@@ -3,8 +3,8 @@
 One request per turn, with the settings verified on 2026-09-11: tool calling
 through ``tools``, thinking through ``reasoning_effort``, the direct tier
 through ``metadata.completion_window``, and prefix caching through
-``prompt_cache_key``. Sail makes exactly one attempt per request, so the single
-retry here carries an idempotency key and only fires on failures the server
+``prompt_cache_key``. Sail makes exactly one attempt per request, so the retries
+here, ``[worker].inference_retries`` of them, carry one idempotency key and only fire on failures the server
 labels as transient.
 """
 
@@ -117,7 +117,8 @@ class SailChatModel:
         payload = self._payload(messages, tools, cache_key)
         key = f"autoresearch-{uuid.uuid4().hex}"
         last: Exception | None = None
-        for attempt in range(2):
+        retries = self._config.inference_retries
+        for attempt in range(1 + retries):
             t0 = time.perf_counter()
             try:
                 raw = self._sail.inference.chat.completions.create(
@@ -128,7 +129,7 @@ class SailChatModel:
                 return parse_response(raw, time.perf_counter() - t0)
             except Exception as e:
                 last = e
-                if attempt == 0 and _is_transient(e):
+                if attempt < retries and _is_transient(e):
                     time.sleep(2.0)
                     continue
                 break

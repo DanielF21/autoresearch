@@ -31,6 +31,10 @@ cannot complete a verify call on is not timed, because a patch that hangs or
 crashes would otherwise cost twelve launch timeouts for that input. The other
 inputs are still timed and the tests run regardless.
 
+Two settings a harness run never sets end a measurement early, for the
+AlphaEvolve comparison: ``measurement_timeout`` caps its seconds, and
+``stop_on_failed_tests`` stops it at the first test suite that fails.
+
 Every step that runs in the box goes through a guest program that prints one
 JSON line, so the referee never parses free text. One launch times one input on
 one tree. Anything that goes wrong at the box level raises BoxError to the
@@ -41,6 +45,7 @@ is a fact in the measurement.
 from __future__ import annotations
 
 import json
+import math
 import shlex
 import time
 from collections.abc import Callable
@@ -77,6 +82,11 @@ PATCH_FILE = f"{WORK_DIR}/attempt.diff"
 
 class GuestError(RuntimeError):
     """A guest program did not produce a usable JSON record."""
+
+
+class MeasurementCapError(RuntimeError):
+    """The measurement ran past ``[referee].measurement_timeout``. Not a GuestError,
+    so no step records it and carries on: ``measure`` stops at once."""
 
 
 @dataclass(frozen=True)
@@ -279,12 +289,19 @@ class _Facts:
 
 class Referee:
     def __init__(
-        self, box: Box, config: RunConfig, draw_seed: Callable[[], int] = timing.draw_seed
+        self,
+        box: Box,
+        config: RunConfig,
+        draw_seed: Callable[[], int] = timing.draw_seed,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._box = box
         self._config = config
         self._draw_seed = draw_seed
+        self._clock = clock
         self._broken = ""
+        # Set only while ``measure`` runs under a measurement_timeout.
+        self._deadline: float | None = None
 
     @property
     def box(self) -> Box:
@@ -338,6 +355,8 @@ class Referee:
             facts.apply_error = "diff touches no files"
             return facts.finish(time.perf_counter() - t0)
 
+        cap = cfg.referee.measurement_timeout
+        self._deadline = None if cap is None else self._clock() + cap
         try:
             self._box.write(PATCH_FILE, patch.encode())
             self._worktree(BASE_TREE, target.sha, patch_file=None)
@@ -354,6 +373,8 @@ class Referee:
                     self._tests(PATCHED_TREE, target.tests.module, "module", workers=1)
                 ),
             )
+            if self._stop_after_tests(facts, "module"):
+                return facts.finish(time.perf_counter() - t0)
             self._step(
                 facts,
                 "full tests",
@@ -361,6 +382,8 @@ class Referee:
                     self._tests(PATCHED_TREE, target.tests.full, "full", workers=4)
                 ),
             )
+            if self._stop_after_tests(facts, "full"):
+                return facts.finish(time.perf_counter() - t0)
 
             # Verify every input on both trees before timing any of them, so a
             # patch that cannot run at all is found in one cheap call per input
@@ -382,7 +405,14 @@ class Referee:
             for inp in timeable:
                 self._step(facts, f"timing {inp.spec.name}", partial(self._time_input, facts, inp))
             return facts.finish(time.perf_counter() - t0)
+        except MeasurementCapError as e:
+            facts.errors.append(str(e))
+            # A step the cap cut off may still be running on the box, where it would
+            # share the machine with the next measurement's timing launches.
+            self._broken = str(e)
+            return facts.finish(time.perf_counter() - t0)
         finally:
+            self._deadline = None
             self._cleanup()
 
     def null_pairs(
@@ -700,7 +730,16 @@ class Referee:
         env: dict[str, str] | None = None,
         pin: int | None = None,
     ) -> GuestRecord:
+        capped = False
+        if self._deadline is not None:
+            remaining = self._deadline - self._clock()
+            if remaining <= 0:
+                raise MeasurementCapError(self._capped(script))
+            capped = remaining < timeout
+            timeout = max(1, min(timeout, math.ceil(remaining)))
         r = self._box.run(guest_command(script, *args, pin=pin), timeout=timeout, env=env)
+        if capped and r.timed_out:
+            raise MeasurementCapError(self._capped(script))
         line = r.last_json_line()
         if line is None:
             raise GuestError(
@@ -708,6 +747,26 @@ class Referee:
                 f"{', timed out' if r.timed_out else ''}): {r.stderr[-800:]}"
             )
         return GuestRecord(json.loads(line), r)
+
+    def _stop_after_tests(self, facts: _Facts, scope: str) -> bool:
+        """Whether ``stop_on_failed_tests`` ends the measurement after this suite: it
+        failed, or it could not run at all."""
+        if not self._config.referee.stop_on_failed_tests:
+            return False
+        suite = next((s for s in facts.tests if s.scope == scope), None)
+        if suite is not None and suite.ok:
+            return False
+        facts.errors.append(
+            f"{scope} tests failed; the rest was not measured (stop_on_failed_tests)"
+        )
+        return True
+
+    def _capped(self, script: str) -> str:
+        cap = self._config.referee.measurement_timeout
+        return (
+            f"measurement cap of {cap} s reached during {script}; every step after it was "
+            "skipped, so this attempt cannot clear the noise floor"
+        )
 
     def _worktree(self, path: str, commit: str, patch_file: str | None) -> GuestRecord:
         args = ["--repo", REPO_DIR, "--worktree", path, "--commit", commit]

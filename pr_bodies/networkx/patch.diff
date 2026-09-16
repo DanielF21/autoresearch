@@ -1,0 +1,73 @@
+diff --git a/networkx/algorithms/cluster.py b/networkx/algorithms/cluster.py
+index e74e10aad..89d7ae910 100644
+--- a/networkx/algorithms/cluster.py
++++ b/networkx/algorithms/cluster.py
+@@ -167,6 +167,68 @@ def _directed_triangles_and_degree_iter(G, nodes=None):
+     directed triangles so does not count triangles twice.
+ 
+     """
++    if nodes is None:
++        # Use integer bitsets for the common all-nodes case.  The nodes are
++        # mapped to small integers once, and the in/out neighbourhoods are
++        # stored as integer masks.  The four set intersections in the
++        # original loop then become bitwise ANDs followed by ``bit_count``,
++        # which avoids constructing a fresh set for every neighbour of every
++        # node.  Keep the small graph threshold so a huge sparse graph does
++        # not pay for large integer operations.
++        if len(G) <= 4096:
++            node_to_idx = {node: idx for idx, node in enumerate(G)}
++            n = len(G)
++            pred = [0] * n
++            succ = [0] * n
++            pred_adj = G._pred
++            succ_adj = G._succ
++
++            for node, idx in node_to_idx.items():
++                p = 0
++                for u in pred_adj[node]:
++                    if u != node:
++                        p |= 1 << node_to_idx[u]
++                s = 0
++                for u in succ_adj[node]:
++                    if u != node:
++                        s |= 1 << node_to_idx[u]
++                pred[idx] = p
++                succ[idx] = s
++
++            bit_count = int.bit_count
++            for node, idx in node_to_idx.items():
++                pm = pred[idx]
++                sm = succ[idx]
++                directed_triangles = 0
++                for j in pred_adj[node]:
++                    if j == node:
++                        continue
++                    jidx = node_to_idx[j]
++                    jp = pred[jidx]
++                    js = succ[jidx]
++                    directed_triangles += (
++                        bit_count(pm & jp)
++                        + bit_count(pm & js)
++                        + bit_count(sm & jp)
++                        + bit_count(sm & js)
++                    )
++                for j in succ_adj[node]:
++                    if j == node:
++                        continue
++                    jidx = node_to_idx[j]
++                    jp = pred[jidx]
++                    js = succ[jidx]
++                    directed_triangles += (
++                        bit_count(pm & jp)
++                        + bit_count(pm & js)
++                        + bit_count(sm & jp)
++                        + bit_count(sm & js)
++                    )
++                dtotal = bit_count(pm) + bit_count(sm)
++                dbidirectional = bit_count(pm & sm)
++                yield (node, dtotal, dbidirectional, directed_triangles)
++            return
++
+     nodes_nbrs = ((n, G._pred[n], G._succ[n]) for n in G.nbunch_iter(nodes))
+ 
+     for i, preds, succs in nodes_nbrs:

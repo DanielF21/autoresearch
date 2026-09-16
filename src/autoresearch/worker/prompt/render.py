@@ -182,9 +182,31 @@ def _input_block(i: BenchmarkInput) -> str:
     return f"{i.name}  ({floor})\n{setup}"
 
 
-def render_target(target: TargetSpec, base_sha: str, pairs: int) -> str:
+def render_target(
+    target: TargetSpec,
+    base_sha: str,
+    pairs: int,
+    *,
+    tools: bool = True,
+    editable: tuple[str, ...] = (),
+) -> str:
+    """The target section. ``tools`` off drops the sentences about run_benchmark,
+    for a reader with no tools; ``editable`` names the files whose marked blocks
+    are the only code that may change, in place of the allowed files line. The
+    defaults render the text every harness worker has been shown, byte for byte."""
     package_at = (
         f"{target.package_root}/{target.package}" if target.package_root != "." else target.package
+    )
+    scope = (
+        f"Editable: only the marked blocks in {', '.join(editable)}.\n"
+        if editable
+        else f"Allowed files: {', '.join(target.allow)}. Never: {', '.join(target.deny)}.\n"
+    )
+    shown = (
+        "You are shown seed 0, and run_benchmark times it." if tools else "You are shown seed 0."
+    )
+    before_submit = (
+        " run_benchmark times every input, so run it before you submit.\n" if tools else "\n"
     )
     return (
         "## Target\n\n"
@@ -193,17 +215,15 @@ def render_target(target: TargetSpec, base_sha: str, pairs: int) -> str:
         f"`{target.alias}` below.\n"
         f"Hot file: {target.hot_file}\n"
         f"Its tests: {target.tests.module}\n"
-        f"Benchmark call: `{target.call}`\n"
-        f"Allowed files: {', '.join(target.allow)}. Never: {', '.join(target.deny)}.\n"
-        "\n### Inputs\n\n"
+        f"Benchmark call: `{target.call}`\n" + scope + "\n### Inputs\n\n"
         f"The same call is timed on every one of these, {_plural(pairs, 'back to back pair')} "
         "each, on every submission. They are not variations to pick between: your patch is "
         "measured on all of them. Each input is the statements below, run once with "
         f"`{target.alias}` bound to the package, `ROOT` to the tree and `SEED` to an integer, "
         "and then the call is timed in that namespace.\n\n"
         "```\n" + "\n\n".join(_input_block(i) for i in target.inputs) + "\n```\n\n"
-        "`SEED` picks the instance of an input its setup builds. You are shown seed 0, and "
-        "run_benchmark times it. The referee times seed 0 and one seed you are never shown, "
+        f"`SEED` picks the instance of an input its setup builds. {shown} "
+        "The referee times seed 0 and one seed you are never shown, "
         "drawn fresh for every measurement, and records the ratio on the seed you did not "
         "see. A patch that is far faster on seed 0 than on the other is recorded as overfit "
         "and is not a speedup. The timed region is the call and a walk over its result that "
@@ -218,8 +238,8 @@ def render_target(target: TargetSpec, base_sha: str, pairs: int) -> str:
         "is elsewhere. Slower means below 1/floor for that input, the mirror of the test "
         "above. This is the rule a fast path tends to fall foul of: setup cost is paid on "
         "every call, so a path that pays for itself where the call is expensive can lose "
-        "where the call is cheap, and a guard on the wrong property will not prevent that. "
-        "run_benchmark times every input, so run it before you submit.\n"
+        "where the call is cheap, and a guard on the wrong property will not prevent that."
+        + before_submit
     )
 
 
